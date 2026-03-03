@@ -1,0 +1,230 @@
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Blender 2D Timeline</title>
+    <meta charset="utf-8">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #2d2d2d;
+            color: #e0e0e0;
+            height: 100vh;
+            overflow: hidden;
+        }
+        
+        #timeline-container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+        
+        .timeline-header {
+            background: #1e1e1e;
+            padding: 10px;
+            border-bottom: 1px solid #444;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .playback-controls {
+            display: flex;
+            gap: 5px;
+        }
+        
+        .playback-controls button {
+            background: #3a3a3a;
+            border: 1px solid #555;
+            color: white;
+            padding: 5px 10px;
+            cursor: pointer;
+            border-radius: 3px;
+        }
+        
+        .playback-controls button:hover {
+            background: #4a4a4a;
+        }
+        
+        .current-frame {
+            font-size: 18px;
+            font-weight: bold;
+            color: #4ecdc4;
+        }
+        
+        .timeline-main {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        .layers-panel {
+            width: 250px;
+            background: #252525;
+            border-right: 1px solid #444;
+            overflow-y: auto;
+        }
+        
+        .layer-item {
+            padding: 8px 15px;
+            border-bottom: 1px solid #333;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        
+        .layer-item:hover {
+            background: #353535;
+        }
+        
+        .layer-item.selected {
+            background: #3a5a78;
+        }
+        
+        .layer-color {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+        }
+        
+        .timeline-area {
+            flex: 1;
+            overflow-x: auto;
+            overflow-y: hidden;
+            position: relative;
+        }
+        
+        .frames-container {
+            display: flex;
+            height: 100%;
+            position: relative;
+        }
+        
+        .frame {
+            width: 30px;
+            border-right: 1px solid #444;
+            position: relative;
+            background: #333;
+        }
+        
+        .frame.current {
+            background: rgba(78, 205, 196, 0.2);
+        }
+        
+        .frame-number {
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            font-size: 10px;
+            color: #888;
+        }
+        
+        .keyframe {
+            position: absolute;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            cursor: pointer;
+            border: 2px solid white;
+        }
+        
+        .keyframe.location { background: #2ecc71; }
+        .keyframe.rotation { background: #3498db; }
+        .keyframe.scale { background: #e74c3c; }
+        
+        .frame-marker {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            width: 2px;
+            background: #4ecdc4;
+            pointer-events: none;
+        }
+        
+        .tools-panel {
+            width: 200px;
+            background: #252525;
+            border-left: 1px solid #444;
+            padding: 15px;
+        }
+        
+        .tool-button {
+            width: 100%;
+            padding: 10px;
+            margin-bottom: 10px;
+            background: #3a3a3a;
+            border: none;
+            color: white;
+            cursor: pointer;
+            border-radius: 4px;
+            text-align: left;
+        }
+        
+        .tool-button:hover {
+            background: #4a4a4a;
+        }
+    </style>
+</head>
+<body>
+    <div id="timeline-container">
+        <div class="timeline-header">
+            <div class="playback-controls">
+                <button onclick="sendCommand('rewind')">◀◀</button>
+                <button onclick="sendCommand('prev_frame')">◀</button>
+                <button onclick="sendCommand('play')">▶</button>
+                <button onclick="sendCommand('next_frame')">▶</button>
+                <button onclick="sendCommand('forward')">▶▶</button>
+            </div>
+            
+            <div class="current-frame" id="current-frame">Frame: 0</div>
+            
+            <button class="tool-button" onclick="sendCommand('insert_key')">Insert Key</button>
+            <button class="tool-button" onclick="sendCommand('delete_key')">Delete Key</button>
+        </div>
+        
+        <div class="timeline-main">
+            <div class="layers-panel" id="layers-panel">
+                <!-- Layers serão inseridos aqui via JS -->
+            </div>
+            
+            <div class="timeline-area" id="timeline-area">
+                <div class="frames-container" id="frames-container">
+                    <!-- Frames serão inseridos aqui via JS -->
+                </div>
+                <div class="frame-marker" id="frame-marker"></div>
+            </div>
+            
+            <div class="tools-panel">
+                <h3>Tools</h3>
+                <button class="tool-button" onclick="setMode('select')">Select</button>
+                <button class="tool-button" onclick="setMode('move_keys')">Move Keys</button>
+                <button class="tool-button" onclick="setMode('scale_keys')">Scale Keys</button>
+                <button class="tool-button" onclick="sendCommand('copy_pose')">Copy Pose</button>
+                <button class="tool-button" onclick="sendCommand('paste_pose')">Paste Pose</button>
+                
+                <div style="margin-top: 20px;">
+                    <h4>Display</h4>
+                    <label>
+                        <input type="checkbox" id="show-location" checked> Location
+                    </label><br>
+                    <label>
+                        <input type="checkbox" id="show-rotation" checked> Rotation
+                    </label><br>
+                    <label>
+                        <input type="checkbox" id="show-scale" checked> Scale
+                    </label>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="timeline.js"></script>
+</body>
+</html>
+"""
