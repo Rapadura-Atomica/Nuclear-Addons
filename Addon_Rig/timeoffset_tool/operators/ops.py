@@ -15,6 +15,21 @@ class TIME_OFFSET_OT_create_clean_frame(Operator):
     bl_label = "Novo Frame na Biblioteca"
     bl_options = {'REGISTER', 'UNDO'}
 
+    use_reference: bpy.props.BoolProperty(
+        name="Usar frame atual como referência",
+        description="Copia o frame atual da timeline como overlay transparente",
+        default=True
+    ) #type: ignore
+    
+    reference_opacity: bpy.props.FloatProperty(
+        name="Opacidade da referência",
+        default=0.3,
+        min=0.1,
+        max=0.8,
+        precision=2,
+        subtype='FACTOR'
+    ) #type: ignore
+
     @classmethod
     def poll(cls, context):
         obj = context.active_object
@@ -23,12 +38,16 @@ class TIME_OFFSET_OT_create_clean_frame(Operator):
     def execute(self, context):
         pose_id = uuid.uuid4().hex
         obj = context.active_object
+        
+        # Frame atual da timeline (referência)
+        timeline_frame = context.scene.frame_current
+        
         if not obj.data.layers:
             self.report({'WARNING'}, "Nenhuma layer encontrada no objeto")
             return {'CANCELLED'}
 
         # Encontrar o menor frame number (mais negativo) entre TODAS as layers
-        first_negative_frame = 0  # Começa com 0
+        first_negative_frame = 0
         for layer in obj.data.layers:
             for frame in layer.frames:
                 if frame.frame_number < first_negative_frame:
@@ -47,17 +66,39 @@ class TIME_OFFSET_OT_create_clean_frame(Operator):
             # Criar novo frame
             new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
 
-            helpers.set_pose_id(obj, new_frame_number, pose_id)
-
             # Limpar strokes
             if gp_api.is_frame_valid(new_frame):
                 self.clear_frame_strokes(new_frame)
 
             layers_processed += 1
 
-        self.report({'INFO'}, f"Frame {new_frame_number} criado na biblioteca ({layers_processed} layers)")
+        helpers.set_pose_id(obj, new_frame_number, pose_id)
         
-        helpers.generate_library_preview(obj, new_frame_number)
+        # Se usar referência, copia o frame atual como overlay
+        if self.use_reference:
+            self.copy_as_reference(
+                obj, 
+                timeline_frame, 
+                new_frame_number,
+                self.reference_opacity
+            )
+            # Salva ponto de retorno
+            context.scene["timeoffset_return_frame"] = timeline_frame
+            self.report({'INFO'}, 
+                f"Frame {new_frame_number} criado com referência do frame {timeline_frame} ({layers_processed} layers)")
+        else:
+            self.report({'INFO'}, f"Frame {new_frame_number} criado na biblioteca ({layers_processed} layers)")
+        
+        # Vai para o novo frame na biblioteca
+        time_mod = helpers.get_time_offset_modifier(obj)
+        if time_mod:
+            time_mod.offset = new_frame_number
+        
+        try:
+            helpers.generate_library_preview(obj, new_frame_number)
+        except Exception as e:
+            print(f"Aviso: Não foi possível gerar preview (não crítico): {e}")
+        
         return {'FINISHED'}
 
     def clear_frame_strokes(self, frame):
@@ -69,12 +110,141 @@ class TIME_OFFSET_OT_create_clean_frame(Operator):
                 strokes.remove(stroke)
         elif hasattr(frame, 'strokes'):
             frame.strokes.clear()
+    
+    def copy_as_reference(self, obj, src_frame, dst_frame, opacity):
+        """Copia strokes do src_frame para dst_frame com baixa opacidade"""
+        # Para cada layer, copiar o frame correspondente
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                continue
+            
+            # Encontrar frame de origem nesta layer
+            src_layer_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == src_frame:
+                    src_layer_frame = frame
+                    break
+            
+            if not src_layer_frame or not gp_api.is_frame_valid(src_layer_frame):
+                continue
+            
+            # Encontrar frame de destino nesta layer
+            dst_layer_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == dst_frame:
+                    dst_layer_frame = frame
+                    break
+            
+            if not dst_layer_frame:
+                continue
+            
+            # Copiar strokes com opacidade ajustada
+            self.copy_strokes_with_opacity(src_layer_frame, dst_layer_frame, opacity)
+    
+    def copy_strokes_with_opacity(self, src_frame, dst_frame, opacity):
+        """Copia strokes de um frame para outro ajustando opacidade"""
+        if gp_api.is_gpv3():
+            # Implementação GPv3
+            if not hasattr(src_frame, 'drawing') or not src_frame.drawing:
+                return
+            
+            src_drawing = src_frame.drawing
+            dst_drawing = dst_frame.drawing
+            
+            # Limpar strokes existentes no destino
+            dst_drawing.strokes.clear()
+            
+            # Copiar strokes um a um
+            for src_stroke in src_drawing.strokes:
+                # Criar novo stroke com mesmo número de pontos
+                num_points = len(src_stroke.points)
+                dst_drawing.add_strokes([num_points])
+                dst_stroke = dst_drawing.strokes[-1]
+                
+                # Copiar atributos do stroke
+                dst_stroke.cyclic = src_stroke.cyclic
+                dst_stroke.softness = src_stroke.softness
+                dst_stroke.start_cap = src_stroke.start_cap
+                dst_stroke.end_cap = src_stroke.end_cap
+                dst_stroke.material_index = src_stroke.material_index
+                
+                # Copiar pontos
+                src_points = src_stroke.points
+                dst_points = dst_stroke.points
+                
+                for i, src_point in enumerate(src_points):
+                    dst_point = dst_points[i]
+                    dst_point.position = src_point.position.copy()
+                    dst_point.radius = src_point.radius
+                    dst_point.opacity = src_point.opacity * opacity  # Ajusta opacidade!
+                    dst_point.rotation = src_point.rotation
+                    
+                    # Copiar vertex color se existir
+                    if hasattr(src_point, 'vertex_color'):
+                        dst_point.vertex_color = src_point.vertex_color.copy()
+        else:
+            # Implementação GPv2
+            if not hasattr(src_frame, 'strokes'):
+                return
+            
+            # Limpar strokes existentes no destino
+            dst_frame.strokes.clear()
+            
+            # Para cada stroke na origem
+            for src_stroke in src_frame.strokes:
+                # Criar novo stroke
+                new_stroke = dst_frame.strokes.new()
+                new_stroke.points.add(len(src_stroke.points))
+                
+                # Copiar atributos do stroke
+                new_stroke.material_index = src_stroke.material_index
+                new_stroke.line_width = src_stroke.line_width
+                new_stroke.use_cyclic = src_stroke.use_cyclic
+                new_stroke.hardness = src_stroke.hardness
+                
+                # Copiar pontos com opacidade ajustada
+                for i, src_point in enumerate(src_stroke.points):
+                    dst_point = new_stroke.points[i]
+                    dst_point.co = src_point.co.copy()
+                    dst_point.pressure = src_point.pressure
+                    dst_point.strength = src_point.strength * opacity  # Ajusta opacidade!
+                    dst_point.vertex_color = src_point.vertex_color.copy()
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=300)
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Opções do Novo Frame:", icon='ADD')
+        layout.separator()
+        
+        box = layout.box()
+        box.prop(self, "use_reference")
+        if self.use_reference:
+            box.prop(self, "reference_opacity", slider=True)
+            box.label(text="O frame atual será copiado como", icon='GHOST_ENABLED')
+            box.label(text="overlay transparente no novo frame")
 
 class TIME_OFFSET_OT_duplicate_current_frame(Operator):
     """Duplica o frame da biblioteca que está definido no TimeOffset (valor negativo)"""
     bl_idname = "time_offset.duplicate_current_frame"
     bl_label = "Duplicar Frame da Biblioteca"
     bl_options = {'REGISTER', 'UNDO'}
+
+    use_reference: bpy.props.BoolProperty(
+        name="Manter frame original como referência",
+        description="Mantém o frame original visível como overlay transparente",
+        default=True
+    ) #type: ignore
+    
+    reference_opacity: bpy.props.FloatProperty(
+        name="Opacidade da referência",
+        default=0.3,
+        min=0.1,
+        max=0.8,
+        precision=2,
+        subtype='FACTOR'
+    ) #type: ignore
 
     @classmethod
     def poll(cls, context):
@@ -155,7 +325,6 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
                     new_frame = gp_api.copy_frame(layer.frames, src_frame, target_frame, new_frame_number)
                     helpers.set_pose_id(obj, new_frame_number, new_pose_id)
 
-
                     # VERIFICAR SE O NOVO FRAME TEM CONTEÚDO
                     new_has_content = False
                     if hasattr(new_frame, 'strokes'):
@@ -196,18 +365,79 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
                 except Exception as e:
                     print(f" ERRO ao criar frame vazio: {str(e)}")
 
+        # Se usar referência, ajusta opacidade do frame original
+        if self.use_reference and self.reference_opacity < 1.0:
+            self.adjust_reference_opacity(obj, target_frame, self.reference_opacity)
+            context.scene["timeoffset_reference_frame"] = target_frame
+            context.scene["timeoffset_return_frame"] = target_frame  # Reuso do mesmo sistema
+
+        # Vai para o novo frame
+        time_mod.offset = new_frame_number
+
         print(f"=== FIM DEBUG: {frames_duplicated} frames duplicados ===")
 
         # Report
         if frames_duplicated > 0:
-            self.report({'INFO'}, f"Frame {target_frame} → {new_frame_number} ({frames_duplicated} layers com conteúdo)")
+            if self.use_reference:
+                self.report({'INFO'}, f"Frame {target_frame} → {new_frame_number} (com referência em {self.reference_opacity*100:.0f}% opacidade)")
+            else:
+                self.report({'INFO'}, f"Frame {target_frame} → {new_frame_number} ({frames_duplicated} layers com conteúdo)")
         else:
             self.report({'WARNING'}, f"Frame duplicado, mas nenhum conteúdo copiado. Verifique o console.")
 
-        helpers.generate_library_preview(obj, new_frame_number)
+        try:
+            helpers.generate_library_preview(obj, new_frame_number)
+        except Exception as e:
+            print(f"⚠️ Aviso: Não foi possível gerar preview (não crítico): {e}")
+
         helpers.get_library_preview(obj, new_frame_number)
         return {'FINISHED'}
     
+    def adjust_reference_opacity(self, obj, frame_number, opacity):
+        """Ajusta a opacidade de todos os strokes em um frame (para referência)"""
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                continue
+            
+            # Encontrar o frame
+            target_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == frame_number:
+                    target_frame = frame
+                    break
+            
+            if not target_frame or not gp_api.is_frame_valid(target_frame):
+                continue
+            
+            if gp_api.is_gpv3():
+                # GPv3
+                if hasattr(target_frame, 'drawing') and target_frame.drawing:
+                    drawing = target_frame.drawing
+                    for stroke in drawing.strokes:
+                        for point in stroke.points:
+                            point.opacity = opacity
+            else:
+                # GPv2
+                if hasattr(target_frame, 'strokes'):
+                    for stroke in target_frame.strokes:
+                        for point in stroke.points:
+                            point.strength = opacity
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=300)
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Opções de Duplicação:", icon='DUPLICATE')
+        layout.separator()
+        
+        box = layout.box()
+        box.prop(self, "use_reference")
+        if self.use_reference:
+            box.prop(self, "reference_opacity", slider=True)
+            box.label(text="O frame original ficará visível", icon='GHOST_ENABLED')
+            box.label(text="como overlay transparente")
+
 #region Old
 
     # EU, digo EU. Tiraria isso aqui vai na fé
@@ -224,6 +454,83 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
     #         print(f" ERRO na duplicação manual: {str(e)}")
     #         return None
 #endregion
+
+class TIME_OFFSET_OT_return_to_reference(Operator):
+    """Volta para o frame da timeline que serviu como referência"""
+    bl_idname = "time_offset.return_to_reference"
+    bl_label = "Voltar à Referência"
+    bl_options = {'REGISTER'}
+    
+    restore_opacity: bpy.props.BoolProperty(
+        name="Restaurar opacidade original",
+        description="Volta a opacidade do frame de referência ao normal",
+        default=True
+    ) #type: ignore
+    
+    @classmethod
+    def poll(cls, context):
+        return "timeoffset_return_frame" in context.scene
+    
+    def execute(self, context):
+        return_frame = context.scene["timeoffset_return_frame"]
+        obj = context.active_object
+        
+        # Se tivermos um frame de referência com opacidade ajustada
+        if self.restore_opacity and "timeoffset_reference_frame" in context.scene:
+            ref_frame = context.scene["timeoffset_reference_frame"]
+            self.restore_original_opacity(obj, ref_frame)
+            del context.scene["timeoffset_reference_frame"]
+        
+        # Volta para o frame original
+        context.scene.frame_current = return_frame
+        
+        # Opcional: Mostrar o frame da biblioteca como referência?
+        # Podemos implementar depois como opção "bidirecional"
+        
+        # Limpa a propriedade
+        del context.scene["timeoffset_return_frame"]
+        
+        self.report({'INFO'}, f"Voltou ao frame {return_frame}")
+        return {'FINISHED'}
+    
+    def restore_original_opacity(self, obj, frame_number):
+        """Restaura opacidade original (1.0) dos strokes"""
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                continue
+            
+            # Encontrar o frame
+            target_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == frame_number:
+                    target_frame = frame
+                    break
+            
+            if not target_frame or not gp_api.is_frame_valid(target_frame):
+                continue
+            
+            if gp_api.is_gpv3():
+                # GPv3
+                if hasattr(target_frame, 'drawing') and target_frame.drawing:
+                    drawing = target_frame.drawing
+                    for stroke in drawing.strokes:
+                        for point in stroke.points:
+                            point.opacity = 1.0
+            else:
+                # GPv2
+                if hasattr(target_frame, 'strokes'):
+                    for stroke in target_frame.strokes:
+                        for point in stroke.points:
+                            point.strength = 1.0
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=250)
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Voltar à Referência", icon='LOOP_BACK')
+        layout.separator()
+        layout.prop(self, "restore_opacity")
 
 class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
     """Flip horizontal do bone selecionado (Numpad 4) - o GP acompanha automaticamente"""
@@ -781,7 +1088,10 @@ class TIME_OFFSET_PT_main_panel(Panel):
         else:
             preview_box = layout.box()
             preview_box.label(text="Preview indisponível", icon='IMAGE_DATA')
-            print(helpers.get_library_preview)
+            preview_key = helpers.get_library_preview(obj, library_frame)
+        if preview_key:
+            print(f"Preview encontrado: {preview_key}")
+            
             preview_box.label(text=f"Frame {library_frame}")
 
 
@@ -961,6 +1271,7 @@ class TIME_OFFSET_OT_update_current_preview(Operator):
 
 # Graças a deus é pouca classe
 classes = (
+    TIME_OFFSET_OT_return_to_reference,
     TIME_OFFSET_OT_create_clean_frame,
     TIME_OFFSET_OT_duplicate_current_frame,
     TIME_OFFSET_OT_toggle_edit_mode,
