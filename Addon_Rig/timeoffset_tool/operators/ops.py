@@ -9,6 +9,93 @@ from ..core import helpers
 import os
 import uuid
 
+# Funções globais de overlay (para serem usadas por várias classes)
+def setup_timeline_overlay_global(context, timeline_frame, opacity):
+    """Versão global da função de overlay"""
+    obj = context.active_object
+    
+    # Determina o tipo correto do modificador
+    if bpy.app.version >= (4, 3, 0):
+        modifier_type = 'GREASE_PENCIL_TIME'
+    else:
+        modifier_type = 'GP_TIME'
+    
+    # Cria objeto ghost
+    temp_obj = obj.copy()
+    temp_obj.data = obj.data.copy()
+    temp_obj.name = f"GHOST_{obj.name}_ref_{timeline_frame}"
+    context.collection.objects.link(temp_obj)
+    
+    # Remove todos os modificadores
+    temp_obj.modifiers.clear()
+    
+    # Adiciona modificador TimeOffset
+    try:
+        mod = temp_obj.modifiers.new(name="GhostTimeOffset", type=modifier_type)
+        mod.offset = timeline_frame
+    except:
+        # Fallback para o outro tipo
+        alt_type = 'GP_TIME' if modifier_type == 'GREASE_PENCIL_TIME' else 'GREASE_PENCIL_TIME'
+        mod = temp_obj.modifiers.new(name="GhostTimeOffset", type=alt_type)
+        mod.offset = timeline_frame
+    
+    # Configura material transparente
+    mat = bpy.data.materials.new(name=f"GhostMat_{timeline_frame}")
+    mat.use_nodes = True
+    
+    if bpy.app.version >= (4, 3, 0):
+        # GPv3 - usa nodes
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        nodes.clear()
+        
+        rgb = nodes.new(type='ShaderNodeRGB')
+        rgb.outputs[0].default_value = (0.3, 0.6, 1.0, opacity)
+        
+        output = nodes.new(type='ShaderNodeOutputMaterial')
+        links.new(rgb.outputs[0], output.inputs[0])
+    else:
+        # GPv2
+        mat.grease_pencil.color = (0.3, 0.6, 1.0, opacity)
+    
+    temp_obj.active_material = mat
+    
+    # Configura ghost
+    temp_obj.hide_select = True
+    temp_obj.show_in_front = True
+    
+    # Salva referência
+    context.scene["timeoffset_ghost_object"] = temp_obj.name
+    
+    print(f"📌 Overlay ativado: frame {timeline_frame}")
+
+def disable_overlay_global(context):
+    """Versão global para desativar overlay"""
+    
+    # Remove objeto ghost
+    if "timeoffset_ghost_object" in context.scene:
+        ghost_name = context.scene["timeoffset_ghost_object"]
+        if ghost_name in bpy.data.objects:
+            bpy.data.objects.remove(bpy.data.objects[ghost_name])
+        del context.scene["timeoffset_ghost_object"]
+    
+    # Remove modifier temporário
+    if "timeoffset_overlay_modifier" in context.scene:
+        obj = context.active_object
+        mod_name = context.scene["timeoffset_overlay_modifier"]
+        if mod_name in obj.modifiers:
+            obj.modifiers.remove(obj.modifiers[mod_name])
+        del context.scene["timeoffset_overlay_modifier"]
+    
+    # Desativa onion skin
+    tool_settings = context.scene.tool_settings
+    if hasattr(tool_settings, 'use_grease_pencil_onion_skin'):
+        tool_settings.use_grease_pencil_onion_skin = False
+    if hasattr(tool_settings, 'gpencil_paint'):
+        gp_tool = tool_settings.gpencil_paint
+        if hasattr(gp_tool, 'use_onion_skinning'):
+            gp_tool.use_onion_skinning = False
+
 class TIME_OFFSET_OT_create_clean_frame(Operator):
     """Cria um novo frame limpo na biblioteca (frames negativos) para TODAS as layers"""
     bl_idname = "time_offset.create_clean_frame"
@@ -453,6 +540,7 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
     #     except Exception as e:
     #         print(f" ERRO na duplicação manual: {str(e)}")
     #         return None
+
 #endregion
 
 class TIME_OFFSET_OT_return_to_reference(Operator):
@@ -539,6 +627,12 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
     bl_description = "Flip horizontal do bone ativo (escala X ou Y = -1 dependendo da orientação). O Grease Pencil deformado acompanha"
     bl_options = {'REGISTER', 'UNDO'}
 
+    insert_offset_keyframe: bpy.props.BoolProperty(
+        name="Inserir Keyframe no Offset",
+        description="Insere keyframe no offset do TimeOffset junto com o flip",
+        default=False
+    ) #type: ignore
+
     @classmethod
     def poll(cls, context):
         return (context.mode == 'POSE' and
@@ -579,7 +673,7 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
         current_frame = context.scene.frame_current
         bone.keyframe_insert(data_path="scale", frame=current_frame)
 
-        # Busca GP associado e keyframe offset (como antes)
+        # Busca GP associado
         gp_obj = None
         armature = context.object
         for obj in context.scene.objects:
@@ -590,15 +684,26 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
 
         if gp_obj:
             time_mod = helpers.get_time_offset_modifier(gp_obj)
-            if time_mod:
+            if time_mod and self.insert_offset_keyframe:
                 time_mod.keyframe_insert(data_path="offset", frame=current_frame)
                 self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframes (scale + offset)")
-            else:
-                self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframe na escala (sem offset)")
+            elif gp_obj:
+                self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframe na escala (sem offset no TimeOffset)")
         else:
             self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframe na escala")
 
         return {'FINISHED'}
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=300)
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Opções do Flip:", icon='UV_SYNC_SELECT')
+        layout.separator()
+        layout.prop(self, "insert_offset_keyframe")
+        if self.insert_offset_keyframe:
+            layout.label(text="⚠️ Vai inserir keyframe no offset", icon='INFO')
 
 class TIME_OFFSET_OT_toggle_edit_mode(Operator):
     """Ativa/desativa a visibilidade do modificador para permitir edição"""
@@ -874,6 +979,489 @@ class TIME_OFFSET_OT_previous_keyframe(Operator):
             self.report({'INFO'}, "Primeiro keyframe alcançado")
         return {'FINISHED'}
 
+class TIME_OFFSET_OT_create_keep_context(Operator):
+    """Cria novo frame na biblioteca mantendo referência do contexto"""
+    bl_idname = "time_offset.create_keep_context"
+    bl_label = "Criar Frame com Contexto"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    reference_opacity: bpy.props.FloatProperty(
+        name="Opacidade da referência",
+        default=0.3,
+        min=0.1,
+        max=0.8,
+        subtype='FACTOR'
+    ) #type: ignore
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and gp_api.obj_is_gp(obj)
+
+    def execute(self, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj)
+        
+        if not time_mod:
+            self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
+            return {'CANCELLED'}
+        
+        # 1. SALVA ESTADOS ORIGINAIS
+        timeline_frame = context.scene.frame_current  # Frame 20
+        original_library_frame = time_mod.offset  # Frame -10
+        original_viewport = time_mod.show_viewport  # ← MUDANÇA AQUI
+        
+        # 2. CRIA NOVO FRAME NA BIBLIOTECA
+        new_library = self.create_library_frame(obj, original_library_frame)
+        
+        if new_library is None:
+            self.report({'ERROR'}, "Não foi possível criar novo frame")
+            return {'CANCELLED'}
+
+        # 3. COPIA O DESENHO ATUAL PARA O NOVO FRAME
+        if original_library_frame < 0:
+            self.copy_library_frame(obj, original_library_frame, new_library)
+        
+        # 4. NÃO MUDA O FRAME DA TIMELINE
+        
+        # 5. CONFIGURA MODO EDIÇÃO CONTEXTUAL
+        # Salva estado original para restaurar depois
+        obj["timeoffset_saved_offset"] = original_library_frame
+        obj["timeoffset_saved_viewport"] = original_viewport  # ← MUDANÇA AQUI
+        obj["timeoffset_saved_timeline"] = timeline_frame
+        
+        # Aponta para o novo frame
+        time_mod.offset = new_library
+        
+        # DESABILITA o viewport do modificador para ver o frame atual da timeline
+        time_mod.show_viewport = False  # ← MUDANÇA AQUI (era show_in_editmode)
+        time_mod.show_in_editmode = True  # Mantém edit mode ativo para desenhar
+        time_mod.show_render = False  # Opcional: desabilita render
+        
+        # ATIVA OVERLAY do frame 20 como referência
+        setup_timeline_overlay_global(context, timeline_frame, self.reference_opacity)
+        
+        # 6. GUARDA METADADOS
+        context.scene["timeoffset_active_overlay"] = new_library
+        context.scene["timeoffset_overlay_opacity"] = self.reference_opacity
+        context.scene["timeoffset_timeline_frame"] = timeline_frame
+        
+        self.report({'INFO'}, 
+            f"✏️ Editando frame {new_library} com referência do frame {timeline_frame} (viewport do modificador desligado)")
+        
+        return {'FINISHED'}
+    
+    def setup_timeline_overlay(self, context, timeline_frame, opacity):
+        """Ativa overlay do frame da timeline como referência"""
+        
+        # PRIORIDADE 1: Usar onion skin nativo do Grease Pencil
+        tool_settings = context.scene.tool_settings
+        
+        if bpy.app.version < (4, 3, 0):
+            # GPv2 - onion skin funciona!
+            if hasattr(tool_settings, 'use_grease_pencil_onion_skin'):
+                tool_settings.use_grease_pencil_onion_skin = True
+                tool_settings.gpencil_onion_skin_frames_before = 0
+                tool_settings.gpencil_onion_skin_frames_after = 0
+                
+                # Limpa frames anteriores
+                if hasattr(tool_settings, 'gpencil_onion_skin_frames'):
+                    tool_settings.gpencil_onion_skin_frames.clear()
+                    
+                    # Adiciona o frame da timeline como referência
+                    onion = tool_settings.gpencil_onion_skin_frames.add()
+                    onion.frame_number = timeline_frame
+                    onion.opacity = opacity
+                    onion.color_type = 'CUSTOM'
+                    onion.color = (0.3, 0.6, 1.0, opacity)  # Azul claro
+                
+                # Ativa visualização
+                for area in context.screen.areas:
+                    if area.type == 'VIEW_3D':
+                        if hasattr(area.spaces.active, 'overlay'):
+                            area.spaces.active.overlay.show_onion_skins = True
+                
+                self.report({'INFO'}, "📌 Overlay da timeline ativado (onion skin)")
+                return
+        
+        # PRIORIDADE 2: GPv3 - criar objeto ghost temporário
+        self.create_ghost_object(context, timeline_frame, opacity)
+    
+    def create_ghost_object(self, context, timeline_frame, opacity):
+        """Cria objeto ghost temporário para referência (GPv3)"""
+        
+        obj = context.active_object
+        
+        # Cria cópia temporária do objeto
+        temp_obj = obj.copy()
+        temp_obj.data = obj.data.copy()
+        temp_obj.name = f"GHOST_{obj.name}_ref"
+        context.collection.objects.link(temp_obj)
+        
+        # Configura material transparente
+        if temp_obj.active_material:
+            mat = temp_obj.active_material.copy()
+        else:
+            mat = bpy.data.materials.new(name="GhostMaterial")
+        
+        # Configura para azul transparente (GPv3)
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+        nodes.clear()
+        
+        # Cria shader de cor com alpha
+        rgb = nodes.new(type='ShaderNodeRGB')
+        rgb.outputs[0].default_value = (0.3, 0.6, 1.0, opacity)
+        
+        output = nodes.new(type='ShaderNodeOutputMaterial')
+        links.new(rgb.outputs[0], output.inputs[0])
+        
+        temp_obj.active_material = mat
+        
+        # Configura modifier para mostrar o frame da timeline
+        # CORREÇÃO AQUI: 'GP_TIME' → 'GREASE_PENCIL_TIME'
+        mod = temp_obj.modifiers.new(name="GhostTimeOffset", type='GREASE_PENCIL_TIME')
+        mod.offset = timeline_frame
+        
+        # Desabilita seleção e outros
+        temp_obj.hide_select = True
+        temp_obj.show_in_front = True
+        
+        # Salva referência para remover depois
+        context.scene["timeoffset_ghost_object"] = temp_obj.name
+        
+        self.report({'INFO'}, f"📌 Overlay da timeline ativado (objeto ghost) frame {timeline_frame}")
+    
+    def create_library_frame(self, obj, reference_frame):
+        """Cria novo frame negativo na biblioteca - GARANTINDO QUE É ÚNICO"""
+        
+        # Encontra o frame MAIS NEGATIVO EXISTENTE
+        most_negative = 0
+        for layer in obj.data.layers:
+            for frame in layer.frames:
+                if frame.frame_number < most_negative:
+                    most_negative = frame.frame_number
+        
+        # Vai descendo até encontrar um número livre
+        new_frame = most_negative
+        frame_exists = True
+        
+        while frame_exists:
+            new_frame -= 1
+            frame_exists = False
+            
+            # Verifica se esse número já existe em ALGUMA layer
+            for layer in obj.data.layers:
+                for frame in layer.frames:
+                    if frame.frame_number == new_frame:
+                        frame_exists = True
+                        break
+                if frame_exists:
+                    break
+        
+        print(f"📌 Novo frame único encontrado: {new_frame}")
+        
+        pose_id = uuid.uuid4().hex
+        
+        # Cria frame em todas layers não bloqueadas
+        layers_processed = 0
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                continue
+            
+            try:
+                new_frame_obj = gp_api.new_active_frame(layer.frames, new_frame)
+                if new_frame_obj:
+                    self.clear_frame_strokes(new_frame_obj)
+                    layers_processed += 1
+            except Exception as e:
+                print(f"⚠️ Erro na layer {layer.info}: {e}")
+        
+        if layers_processed == 0:
+            print("❌ Nenhuma layer processada!")
+            return None
+        
+        helpers.set_pose_id(obj, new_frame, pose_id)
+        print(f"✅ Frame {new_frame} criado com pose_id {pose_id}")
+        
+        return new_frame
+ 
+    def copy_library_frame(self, obj, src_frame, dst_frame):
+        """Copia conteúdo de um frame da biblioteca para outro"""
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                continue
+            
+            # Encontra frame origem
+            src = None
+            for frame in layer.frames:
+                if frame.frame_number == src_frame:
+                    src = frame
+                    break
+            
+            if not src:
+                print(f"⚠️ Frame origem {src_frame} não encontrado na layer {layer.info}")
+                continue
+            
+            # Encontra frame destino (que já deve existir do create_library_frame)
+            dst = None
+            for frame in layer.frames:
+                if frame.frame_number == dst_frame:
+                    dst = frame
+                    break
+            
+            if not dst:
+                print(f"⚠️ Frame destino {dst_frame} não encontrado na layer {layer.info}")
+                continue
+            
+            print(f"📋 Copiando strokes de {src_frame} para {dst_frame} na layer {layer.info}")
+            
+            try:
+                # Limpa strokes existentes no destino
+                if gp_api.is_frame_valid(dst):
+                    self.clear_frame_strokes(dst)
+                
+                # Copia strokes manualmente
+                self.copy_strokes_manual(src, dst)
+                
+            except Exception as e:
+                print(f"❌ Erro ao copiar na layer {layer.info}: {e}")
+        
+        print("✅ Cópia concluída")
+
+    def copy_strokes_manual(self, src_frame, dst_frame):
+        """Copia strokes de um frame para outro manualmente"""
+        
+        if gp_api.is_gpv3():
+            # GPv3
+            if not hasattr(src_frame, 'drawing') or not src_frame.drawing:
+                return
+            
+            src_drawing = src_frame.drawing
+            dst_drawing = dst_frame.drawing
+            
+            # Limpa strokes existentes
+            dst_drawing.strokes.clear()
+            
+            # Copia cada stroke
+            for src_stroke in src_drawing.strokes:
+                num_points = len(src_stroke.points)
+                dst_drawing.add_strokes([num_points])
+                dst_stroke = dst_drawing.strokes[-1]
+                
+                dst_stroke.cyclic = src_stroke.cyclic
+                dst_stroke.softness = src_stroke.softness
+                dst_stroke.start_cap = src_stroke.start_cap
+                dst_stroke.end_cap = src_stroke.end_cap
+                dst_stroke.material_index = src_stroke.material_index
+                
+                for i, src_point in enumerate(src_stroke.points):
+                    dst_point = dst_stroke.points[i]
+                    dst_point.position = src_point.position.copy()
+                    dst_point.radius = src_point.radius
+                    dst_point.opacity = src_point.opacity  # Mantém opacidade original
+                    dst_point.rotation = src_point.rotation
+                    
+                    if hasattr(src_point, 'vertex_color'):
+                        dst_point.vertex_color = src_point.vertex_color.copy()
+        else:
+            # GPv2
+            if not hasattr(src_frame, 'strokes'):
+                return
+            
+            dst_frame.strokes.clear()
+            
+            for src_stroke in src_frame.strokes:
+                new_stroke = dst_frame.strokes.new()
+                new_stroke.points.add(len(src_stroke.points))
+                
+                new_stroke.material_index = src_stroke.material_index
+                new_stroke.line_width = src_stroke.line_width
+                new_stroke.use_cyclic = src_stroke.use_cyclic
+                new_stroke.hardness = src_stroke.hardness
+                
+                for i, src_point in enumerate(src_stroke.points):
+                    dst_point = new_stroke.points[i]
+                    dst_point.co = src_point.co.copy()
+                    dst_point.pressure = src_point.pressure
+                    dst_point.strength = src_point.strength
+                    dst_point.vertex_color = src_point.vertex_color.copy()
+
+    def clear_frame_strokes(self, frame):
+        """Limpa strokes de um frame"""
+        if hasattr(frame, 'nuclear_strokes'):
+            strokes = list(frame.nuclear_strokes)
+            for stroke in strokes:
+                frame.nuclear_strokes.remove(stroke)
+        elif hasattr(frame, 'strokes'):
+            frame.strokes.clear()
+    
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+    
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Criar Novo Frame com Contexto:", icon='ADD')
+        layout.separator()
+        layout.prop(self, "reference_opacity", slider=True)
+        layout.label(text="Você desenhará sobre o frame atual", icon='INFO')
+        layout.label(text="O frame original da timeline ficará como overlay")
+
+class TIME_OFFSET_OT_finish_context_draw(Operator):
+    """Finaliza desenho com contexto e restaura estados originais"""
+    bl_idname = "time_offset.finish_context_draw"
+    bl_label = "Finalizar Desenho"
+    bl_options = {'REGISTER'}
+    
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and "timeoffset_saved_offset" in obj
+    
+    def execute(self, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj)
+        
+        if not time_mod:
+            self.report({'WARNING'}, "Modificador não encontrado")
+            return {'CANCELLED'}
+        
+        # 1. RESTAURA ESTADOS ORIGINAIS
+        if "timeoffset_saved_offset" in obj:
+            time_mod.offset = obj["timeoffset_saved_offset"]
+            del obj["timeoffset_saved_offset"]
+        
+        if "timeoffset_saved_viewport" in obj:  # ← MUDANÇA AQUI
+            time_mod.show_viewport = obj["timeoffset_saved_viewport"]  # ← MUDANÇA AQUI
+            del obj["timeoffset_saved_viewport"]
+        
+        # 2. DESATIVA OVERLAY
+        disable_overlay_global(context)
+        
+        # 3. REMOVE OBJETO GHOST (se existir)
+        if "timeoffset_ghost_object" in context.scene:
+            ghost_name = context.scene["timeoffset_ghost_object"]
+            if ghost_name in bpy.data.objects:
+                bpy.data.objects.remove(bpy.data.objects[ghost_name])
+            del context.scene["timeoffset_ghost_object"]
+        
+        # 4. LIMPA METADADOS DA CENA
+        for prop in ["timeoffset_active_overlay", "timeoffset_overlay_opacity", 
+                    "timeoffset_timeline_frame"]:
+            if prop in context.scene:
+                del context.scene[prop]
+        
+        self.report({'INFO'}, "✅ Modo contexto finalizado. Estados restaurados.")
+        
+        # Força redraw
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+    
+    def disable_overlay(self, context):
+        """Desativa overlay"""
+        tool_settings = context.scene.tool_settings
+        
+        # GPv2
+        if hasattr(tool_settings, 'use_grease_pencil_onion_skin'):
+            try:
+                tool_settings.use_grease_pencil_onion_skin = False
+                if hasattr(tool_settings, 'gpencil_onion_skin_frames'):
+                    tool_settings.gpencil_onion_skin_frames.clear()
+            except:
+                pass
+        
+        # GPv3
+        if hasattr(tool_settings, 'gpencil_paint'):
+            gp_tool = tool_settings.gpencil_paint
+            for attr in ['use_onion_skinning', 'use_onion_skin']:
+                if hasattr(gp_tool, attr):
+                    try:
+                        setattr(gp_tool, attr, False)
+                    except:
+                        pass
+        
+        # Desativa overlay da viewport
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                try:
+                    if hasattr(area.spaces.active, 'overlay'):
+                        if hasattr(area.spaces.active.overlay, 'show_onion_skins'):
+                            area.spaces.active.overlay.show_onion_skins = False
+                except:
+                    pass
+
+class TIME_OFFSET_OT_show_library_frame(Operator):
+    """Mostra o frame da biblioteca que foi modificado"""
+    bl_idname = "time_offset.show_library_frame"
+    bl_label = "Ver Frame Modificado"
+    bl_options = {'REGISTER'}
+    
+    def execute(self, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj)
+        
+        if not time_mod:
+            return {'CANCELLED'}
+        
+        if "timeoffset_active_overlay" in context.scene:
+            library_frame = context.scene["timeoffset_active_overlay"]
+            
+            # Salva frame atual para poder voltar
+            context.scene["timeoffset_return_to_timeline"] = context.scene.frame_current
+            
+            # Vai para o frame da biblioteca
+
+            time_mod.offset = library_frame
+            # Reativa viewport do modificador para ver o frame
+            time_mod.show_viewport = True  # ← MUDANÇA AQUI
+            # Desabilita overlay temporariamente (opcional)
+            disable_overlay_global(context)
+            
+            self.report({'INFO'}, f"Mostrando frame da biblioteca {library_frame}")
+        else:
+            self.report({'WARNING'}, "Nenhum frame overlay ativo")
+        
+        return {'FINISHED'}
+
+class TIME_OFFSET_OT_return_to_timeline(Operator):
+    """Volta para o frame da timeline (modo contexto)"""
+    bl_idname = "time_offset.return_to_timeline"
+    bl_label = "Voltar à Timeline"
+    bl_options = {'REGISTER'}
+    
+    def execute(self, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj)
+        
+        if not time_mod:
+            return {'CANCELLED'}
+        
+        if "timeoffset_return_to_timeline" in context.scene:
+            timeline_frame = context.scene["timeoffset_return_to_timeline"]
+            
+            # Volta timeline
+            context.scene.frame_current = timeline_frame
+            
+            # Volta modifier para o frame overlay
+            if "timeoffset_active_overlay" in context.scene:
+                time_mod.offset = context.scene["timeoffset_active_overlay"]
+                # Desabilita viewport do modificador (volta a ver a timeline)
+                time_mod.show_viewport = False  # ← MUDANÇA AQUI
+                
+                # Reativa overlay
+                opacity = context.scene.get("timeoffset_overlay_opacity", 0.3)
+                setup_timeline_overlay_global(context, timeline_frame, opacity)
+            
+            del context.scene["timeoffset_return_to_timeline"]
+            
+            self.report({'INFO'}, f"Voltou ao modo contexto")
+        
+        return {'FINISHED'}
+
 class TIME_OFFSET_OT_insert_keyframe_timeline(Operator):
     """Insere keyframes na timeline (equivalente a pressionar I) - tecla F6"""
     bl_idname = "time_offset.insert_keyframe_timeline"
@@ -1088,12 +1676,7 @@ class TIME_OFFSET_PT_main_panel(Panel):
         else:
             preview_box = layout.box()
             preview_box.label(text="Preview indisponível", icon='IMAGE_DATA')
-            preview_key = helpers.get_library_preview(obj, library_frame)
-        if preview_key:
-            print(f"Preview encontrado: {preview_key}")
-            
             preview_box.label(text=f"Frame {library_frame}")
-
 
         # Informações do modificador
         box = layout.box()
@@ -1133,9 +1716,11 @@ class TIME_OFFSET_PT_main_panel(Panel):
                      icon='DUPLICATE')
         col.operator("time_offset.update_current_preview", 
                      text="Atualizar Preview Atual", 
-                     icon='FILE_REFRESH')  # ícone de refresh/atualizar
-        # Nova feature: Flip Horizontal
-        col.operator("time_offset.flip_horizontal", text="Flip Horizontal", icon='UV_SYNC_SELECT')  # Icon para flip
+                     icon='FILE_REFRESH')
+
+        # Flip Horizontal com opções
+        flip_op = col.operator("time_offset.flip_horizontal", text="Flip Horizontal", icon='UV_SYNC_SELECT')
+        flip_op.insert_offset_keyframe = False  # Padrão: não insere keyframe
 
         col = layout.column(align=True)
         col.operator("time_offset.assign_all_frames", 
@@ -1150,6 +1735,31 @@ class TIME_OFFSET_PT_main_panel(Panel):
 
         # Botão para ir ao primeiro frame da biblioteca
         col.operator("time_offset.go_to_first_library_frame", text="Primeiro da Biblioteca", icon='REW')
+
+        # MODO CONTEXTO - Se estiver ativo
+        if "timeoffset_active_overlay" in context.scene:
+            box = layout.box()
+            box.label(text="🎨 MODO CONTEXTO ATIVO", icon='INFO')
+            box.label(text=f"Sobrepondo frame: {context.scene['timeoffset_active_overlay']}")
+            box.label(text=f"Opacidade: {context.scene['timeoffset_overlay_opacity']*100:.0f}%")
+            
+            row = box.row(align=True)
+            row.operator("time_offset.show_library_frame", 
+                        text="Ver Modificações", 
+                        icon='HIDE_OFF')
+            row.operator("time_offset.return_to_timeline", 
+                        text="Voltar Timeline", 
+                        icon='LOOP_BACK')
+            
+            box.operator("time_offset.finish_context_draw", 
+                        text="Finalizar", 
+                        icon='CHECKMARK')
+        else:
+            # Botão principal
+            col = layout.column(align=True)
+            col.operator("time_offset.create_keep_context", 
+                        text="Criar Frame com Contexto", 
+                        icon='OVERLAY')
 
         # Seção de animação
         layout.separator()
@@ -1238,7 +1848,10 @@ class TIME_OFFSET_OT_update_current_preview(Operator):
                 print(f"DEBUG: Erro ao remover arquivo antigo: {e}")
 
         # Gera o novo preview (vai criar o PNG novo)
-        helpers.generate_library_preview(obj, current_library_frame)
+        try:
+            helpers.generate_library_preview(obj, current_library_frame)
+        except Exception as e:
+            print(f"⚠️ Aviso: Não foi possível gerar preview (não crítico): {e}")
 
         # Força recarregamento na coleção de previews
         pcoll = helpers.get_preview_collection()
@@ -1246,8 +1859,11 @@ class TIME_OFFSET_OT_update_current_preview(Operator):
 
         # Remove a entrada antiga da coleção (importante!)
         if key in pcoll:
-            pcoll.unload(key)  # Descarrega da memória
-            print(f"DEBUG: Imagem antiga descarregada da coleção: {key}")
+            try:
+                pcoll.unload(key)
+                print(f"DEBUG: Imagem antiga descarregada da coleção: {key}")
+            except:
+                pass
 
         # Recarrega o arquivo novo com a mesma chave
         try:
@@ -1255,8 +1871,8 @@ class TIME_OFFSET_OT_update_current_preview(Operator):
             print(f"DEBUG: Nova imagem carregada: {key}")
         except Exception as e:
             print(f"DEBUG: Erro ao recarregar preview: {e}")
-            self.report({'ERROR'}, "Falha ao recarregar a imagem no painel")
-            return {'CANCELLED'}
+            self.report({'WARNING'}, "Preview não pôde ser recarregado, mas o frame foi atualizado")
+            # Não cancela a operação - o frame foi atualizado mesmo sem preview
 
         # Invalidar tudo para garantir refresh do UI
         helpers.invalidate_library_previews()
@@ -1278,6 +1894,10 @@ classes = (
     TIME_OFFSET_OT_navigate_previous,
     TIME_OFFSET_OT_navigate_next,
     TIME_OFFSET_OT_go_to_first_library_frame,
+    TIME_OFFSET_OT_create_keep_context,
+    TIME_OFFSET_OT_finish_context_draw,
+    TIME_OFFSET_OT_show_library_frame,
+    TIME_OFFSET_OT_return_to_timeline,
     TIME_OFFSET_OT_animate_offset,
     TIME_OFFSET_OT_remove_animation,
     TIME_OFFSET_OT_next_keyframe,
@@ -1290,4 +1910,3 @@ classes = (
     TIME_OFFSET_PT_missing_modifier,
     TIME_OFFSET_OT_update_current_preview,
 )
-
