@@ -1009,7 +1009,8 @@ class TIME_OFFSET_OT_create_keep_context(Operator):
         # 1. SALVA ESTADOS ORIGINAIS
         timeline_frame = context.scene.frame_current  # Frame 20
         original_library_frame = time_mod.offset  # Frame -10
-        original_viewport = time_mod.show_viewport  # ← MUDANÇA AQUI
+        original_viewport = time_mod.show_viewport
+        original_editmode = time_mod.show_in_editmode
         
         # 2. CRIA NOVO FRAME NA BIBLIOTECA
         new_library = self.create_library_frame(obj, original_library_frame)
@@ -1022,117 +1023,40 @@ class TIME_OFFSET_OT_create_keep_context(Operator):
         if original_library_frame < 0:
             self.copy_library_frame(obj, original_library_frame, new_library)
         
-        # 4. NÃO MUDA O FRAME DA TIMELINE
-        
-        # 5. CONFIGURA MODO EDIÇÃO CONTEXTUAL
-        # Salva estado original para restaurar depois
+        # 4. SALVA TODOS OS ESTADOS PARA RESTAURAR DEPOIS
         obj["timeoffset_saved_offset"] = original_library_frame
-        obj["timeoffset_saved_viewport"] = original_viewport  # ← MUDANÇA AQUI
+        obj["timeoffset_saved_viewport"] = original_viewport
+        obj["timeoffset_saved_editmode"] = original_editmode
         obj["timeoffset_saved_timeline"] = timeline_frame
+        obj["timeoffset_new_frame"] = new_library
         
-        # Aponta para o novo frame
+        # 5. CONFIGURA PARA EDIÇÃO:
+        #    - Aponta modifier para o novo frame
+        #    - MUDA O FRAME ATIVO DA TIMELINE para o novo frame
+        #    - Cria overlay do frame original
+        
+        # Aponta modifier para o novo frame
         time_mod.offset = new_library
+        time_mod.show_viewport = True  # Mostra o frame que estamos editando
+        time_mod.show_in_editmode = True  # Permite edição
         
-        # DESABILITA o viewport do modificador para ver o frame atual da timeline
-        time_mod.show_viewport = False  # ← MUDANÇA AQUI (era show_in_editmode)
-        time_mod.show_in_editmode = True  # Mantém edit mode ativo para desenhar
-        time_mod.show_render = False  # Opcional: desabilita render
+        # MUDA O FRAME ATIVO DA TIMELINE para o novo frame
+        # Isso garante que o desenho vá para o frame correto
+        context.scene.frame_current = new_library
         
-        # ATIVA OVERLAY do frame 20 como referência
+        # CRIA OVERLAY do frame original da timeline como referência
         setup_timeline_overlay_global(context, timeline_frame, self.reference_opacity)
         
-        # 6. GUARDA METADADOS
+        # 6. GUARDA METADADOS NA CENA
         context.scene["timeoffset_active_overlay"] = new_library
         context.scene["timeoffset_overlay_opacity"] = self.reference_opacity
         context.scene["timeoffset_timeline_frame"] = timeline_frame
         
         self.report({'INFO'}, 
-            f"✏️ Editando frame {new_library} com referência do frame {timeline_frame} (viewport do modificador desligado)")
+            f"Editando frame {new_library} (timeline mudou para lá) com overlay do frame {timeline_frame}")
         
         return {'FINISHED'}
-    
-    def setup_timeline_overlay(self, context, timeline_frame, opacity):
-        """Ativa overlay do frame da timeline como referência"""
-        
-        # PRIORIDADE 1: Usar onion skin nativo do Grease Pencil
-        tool_settings = context.scene.tool_settings
-        
-        if bpy.app.version < (4, 3, 0):
-            # GPv2 - onion skin funciona!
-            if hasattr(tool_settings, 'use_grease_pencil_onion_skin'):
-                tool_settings.use_grease_pencil_onion_skin = True
-                tool_settings.gpencil_onion_skin_frames_before = 0
-                tool_settings.gpencil_onion_skin_frames_after = 0
-                
-                # Limpa frames anteriores
-                if hasattr(tool_settings, 'gpencil_onion_skin_frames'):
-                    tool_settings.gpencil_onion_skin_frames.clear()
-                    
-                    # Adiciona o frame da timeline como referência
-                    onion = tool_settings.gpencil_onion_skin_frames.add()
-                    onion.frame_number = timeline_frame
-                    onion.opacity = opacity
-                    onion.color_type = 'CUSTOM'
-                    onion.color = (0.3, 0.6, 1.0, opacity)  # Azul claro
-                
-                # Ativa visualização
-                for area in context.screen.areas:
-                    if area.type == 'VIEW_3D':
-                        if hasattr(area.spaces.active, 'overlay'):
-                            area.spaces.active.overlay.show_onion_skins = True
-                
-                self.report({'INFO'}, "📌 Overlay da timeline ativado (onion skin)")
-                return
-        
-        # PRIORIDADE 2: GPv3 - criar objeto ghost temporário
-        self.create_ghost_object(context, timeline_frame, opacity)
-    
-    def create_ghost_object(self, context, timeline_frame, opacity):
-        """Cria objeto ghost temporário para referência (GPv3)"""
-        
-        obj = context.active_object
-        
-        # Cria cópia temporária do objeto
-        temp_obj = obj.copy()
-        temp_obj.data = obj.data.copy()
-        temp_obj.name = f"GHOST_{obj.name}_ref"
-        context.collection.objects.link(temp_obj)
-        
-        # Configura material transparente
-        if temp_obj.active_material:
-            mat = temp_obj.active_material.copy()
-        else:
-            mat = bpy.data.materials.new(name="GhostMaterial")
-        
-        # Configura para azul transparente (GPv3)
-        mat.use_nodes = True
-        nodes = mat.node_tree.nodes
-        links = mat.node_tree.links
-        nodes.clear()
-        
-        # Cria shader de cor com alpha
-        rgb = nodes.new(type='ShaderNodeRGB')
-        rgb.outputs[0].default_value = (0.3, 0.6, 1.0, opacity)
-        
-        output = nodes.new(type='ShaderNodeOutputMaterial')
-        links.new(rgb.outputs[0], output.inputs[0])
-        
-        temp_obj.active_material = mat
-        
-        # Configura modifier para mostrar o frame da timeline
-        # CORREÇÃO AQUI: 'GP_TIME' → 'GREASE_PENCIL_TIME'
-        mod = temp_obj.modifiers.new(name="GhostTimeOffset", type='GREASE_PENCIL_TIME')
-        mod.offset = timeline_frame
-        
-        # Desabilita seleção e outros
-        temp_obj.hide_select = True
-        temp_obj.show_in_front = True
-        
-        # Salva referência para remover depois
-        context.scene["timeoffset_ghost_object"] = temp_obj.name
-        
-        self.report({'INFO'}, f"📌 Overlay da timeline ativado (objeto ghost) frame {timeline_frame}")
-    
+
     def create_library_frame(self, obj, reference_frame):
         """Cria novo frame negativo na biblioteca - GARANTINDO QUE É ÚNICO"""
         
@@ -1327,26 +1251,33 @@ class TIME_OFFSET_OT_finish_context_draw(Operator):
             self.report({'WARNING'}, "Modificador não encontrado")
             return {'CANCELLED'}
         
-        # 1. RESTAURA ESTADOS ORIGINAIS
+        # 1. RESTAURA O FRAME DA TIMELINE ORIGINAL
+        if "timeoffset_saved_timeline" in obj:
+            context.scene.frame_current = obj["timeoffset_saved_timeline"]
+        
+        # 2. RESTAURA O OFFSET ORIGINAL DO MODIFICADOR
         if "timeoffset_saved_offset" in obj:
             time_mod.offset = obj["timeoffset_saved_offset"]
             del obj["timeoffset_saved_offset"]
         
-        if "timeoffset_saved_viewport" in obj:  # ← MUDANÇA AQUI
-            time_mod.show_viewport = obj["timeoffset_saved_viewport"]  # ← MUDANÇA AQUI
+        # 3. RESTAURA VISIBILIDADE ORIGINAL
+        if "timeoffset_saved_viewport" in obj:
+            time_mod.show_viewport = obj["timeoffset_saved_viewport"]
             del obj["timeoffset_saved_viewport"]
         
-        # 2. DESATIVA OVERLAY
+        if "timeoffset_saved_editmode" in obj:
+            time_mod.show_in_editmode = obj["timeoffset_saved_editmode"]
+            del obj["timeoffset_saved_editmode"]
+        
+        # 4. DESATIVA OVERLAY
         disable_overlay_global(context)
         
-        # 3. REMOVE OBJETO GHOST (se existir)
-        if "timeoffset_ghost_object" in context.scene:
-            ghost_name = context.scene["timeoffset_ghost_object"]
-            if ghost_name in bpy.data.objects:
-                bpy.data.objects.remove(bpy.data.objects[ghost_name])
-            del context.scene["timeoffset_ghost_object"]
+        # 5. LIMPA METADADOS DO OBJETO
+        for prop in ["timeoffset_saved_timeline", "timeoffset_new_frame"]:
+            if prop in obj:
+                del obj[prop]
         
-        # 4. LIMPA METADADOS DA CENA
+        # 6. LIMPA METADADOS DA CENA
         for prop in ["timeoffset_active_overlay", "timeoffset_overlay_opacity", 
                     "timeoffset_timeline_frame"]:
             if prop in context.scene:
@@ -1360,39 +1291,6 @@ class TIME_OFFSET_OT_finish_context_draw(Operator):
                 area.tag_redraw()
         
         return {'FINISHED'}
-    
-    def disable_overlay(self, context):
-        """Desativa overlay"""
-        tool_settings = context.scene.tool_settings
-        
-        # GPv2
-        if hasattr(tool_settings, 'use_grease_pencil_onion_skin'):
-            try:
-                tool_settings.use_grease_pencil_onion_skin = False
-                if hasattr(tool_settings, 'gpencil_onion_skin_frames'):
-                    tool_settings.gpencil_onion_skin_frames.clear()
-            except:
-                pass
-        
-        # GPv3
-        if hasattr(tool_settings, 'gpencil_paint'):
-            gp_tool = tool_settings.gpencil_paint
-            for attr in ['use_onion_skinning', 'use_onion_skin']:
-                if hasattr(gp_tool, attr):
-                    try:
-                        setattr(gp_tool, attr, False)
-                    except:
-                        pass
-        
-        # Desativa overlay da viewport
-        for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
-                try:
-                    if hasattr(area.spaces.active, 'overlay'):
-                        if hasattr(area.spaces.active.overlay, 'show_onion_skins'):
-                            area.spaces.active.overlay.show_onion_skins = False
-                except:
-                    pass
 
 class TIME_OFFSET_OT_show_library_frame(Operator):
     """Mostra o frame da biblioteca que foi modificado"""
@@ -1441,16 +1339,16 @@ class TIME_OFFSET_OT_return_to_timeline(Operator):
             return {'CANCELLED'}
         
         if "timeoffset_return_to_timeline" in context.scene:
+            # Já estamos no modo "ver biblioteca", vamos voltar
             timeline_frame = context.scene["timeoffset_return_to_timeline"]
             
-            # Volta timeline
+            # Volta timeline para o frame original
             context.scene.frame_current = timeline_frame
             
             # Volta modifier para o frame overlay
             if "timeoffset_active_overlay" in context.scene:
                 time_mod.offset = context.scene["timeoffset_active_overlay"]
-                # Desabilita viewport do modificador (volta a ver a timeline)
-                time_mod.show_viewport = False  # ← MUDANÇA AQUI
+                time_mod.show_viewport = True
                 
                 # Reativa overlay
                 opacity = context.scene.get("timeoffset_overlay_opacity", 0.3)
