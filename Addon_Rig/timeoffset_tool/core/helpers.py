@@ -106,32 +106,61 @@ def generate_library_preview(obj, frame):
     scene = bpy.context.scene
     view_layer = bpy.context.view_layer
     old_frame = scene.frame_current
+    
     # Garantir objeto ativo
     bpy.ops.object.select_all(action='DESELECT')
     obj.select_set(True)
     view_layer.objects.active = obj
     scene.frame_set(frame)
     bpy.context.view_layer.update()
+    
     preview_dir = os.path.join(
         bpy.app.tempdir,
         "timeoffset_previews",
         obj.name
     )
     os.makedirs(preview_dir, exist_ok=True)
-    pose_id = get_pose_id(obj, frame)  # ← Mudança aqui!
+    
+    pose_id = get_pose_id(obj, frame)
     if not pose_id:
         print("❌ Frame sem pose_id, preview cancelado")
         scene.frame_set(old_frame)
         return
+    
     filepath = os.path.join(preview_dir, f"{pose_id}.png")
+    
     if os.path.exists(filepath):
         print("ℹ️ Preview já existe, não será recriado")
         scene.frame_set(old_frame)
         return
-    scene.render.image_settings.file_format = 'PNG'
-    scene.render.image_settings.color_mode = 'RGBA'
-    scene.render.image_settings.color_depth = '8'
-    scene.render.image_settings.compression = 15
+    
+    # Configurações de renderização compatíveis com Blender 5.0
+    old_file_format = scene.render.image_settings.file_format
+    
+    # No Blender 5.0, as opções são diferentes
+    try:
+        # Tentar primeiro com PNG (Blender < 5.0)
+        scene.render.image_settings.file_format = 'PNG'
+    except TypeError:
+        # Se falhar, tentar formatos do Blender 5.0+
+        try:
+            scene.render.image_settings.file_format = 'IMAGE'
+            # Em versões mais novas, precisa configurar o formato dentro de 'IMAGE'
+            if hasattr(scene.render.image_settings, 'color_mode'):
+                scene.render.image_settings.color_mode = 'RGBA'
+        except:
+            # Último recurso: tentar FFMPEG com PNG
+            scene.render.image_settings.file_format = 'FFMPEG'
+            scene.render.ffmpeg.format = 'PNG'
+    
+    # Configurar cores (pode ser que precise de ajustes diferentes por versão)
+    try:
+        scene.render.image_settings.color_mode = 'RGBA'
+        scene.render.image_settings.color_depth = '8'
+        scene.render.image_settings.compression = 15
+    except:
+        pass  # Ignora se não existirem nessas versões
+    
     for area in bpy.context.window.screen.areas:
         if area.type == 'VIEW_3D':
             region = next(
@@ -140,21 +169,31 @@ def generate_library_preview(obj, frame):
             )
             if not region:
                 continue
+            
             old_filepath = scene.render.filepath
             scene.render.filepath = filepath
+            
             with bpy.context.temp_override(
                 scene=scene,
                 area=area,
                 region=region,
             ):
-                bpy.ops.render.opengl(
-                    write_still=True,
-                    view_context=True
-                )
+                try:
+                    bpy.ops.render.opengl(
+                        write_still=True,
+                        view_context=True
+                    )
+                except Exception as e:
+                    print(f"❌ Erro no render: {e}")
+            
             scene.render.filepath = old_filepath
             break
+    
+    # Restaurar configurações originais
+    scene.render.image_settings.file_format = old_file_format
     scene.frame_set(old_frame)
     bpy.context.view_layer.update()
+    
     invalidate_library_previews()
 
 def get_library_preview(obj, frame):

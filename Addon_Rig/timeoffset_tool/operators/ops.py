@@ -207,7 +207,89 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
         helpers.generate_library_preview(obj, new_frame_number)
         helpers.get_library_preview(obj, new_frame_number)
         return {'FINISHED'}
-    
+
+class TIME_OFFSET_OT_capture_to_library(Operator):
+    """Captura o frame atual da timeline e armazena na biblioteca sem sair do frame atual"""
+    bl_idname = "time_offset.capture_to_library"
+    bl_label = "Capturar para Biblioteca"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and gp_api.obj_is_gp(obj)
+
+    def execute(self, context):
+        obj = context.active_object
+        current_frame = context.scene.frame_current
+        
+        # Encontrar o frame mais negativo para criar o novo
+        most_negative = 0
+        for layer in obj.data.layers:
+            for frame in layer.frames:
+                if frame.frame_number < most_negative:
+                    most_negative = frame.frame_number
+        
+        new_frame_number = most_negative - 1
+        new_pose_id = uuid.uuid4().hex
+        
+        layers_processed = 0
+        frames_captured = 0
+        
+        print(f"=== Capturando frame {current_frame} para {new_frame_number} ===")
+        
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                continue
+                
+            # Verificar se existe um frame no número atual
+            src_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == current_frame:
+                    src_frame = frame
+                    break
+            
+            if src_frame and gp_api.is_frame_valid(src_frame):
+                # Se existe frame, copiar seu conteúdo
+                try:
+                    new_frame = gp_api.copy_frame(
+                        layer.frames, 
+                        src_frame, 
+                        current_frame,  # Este é o frame_number de origem
+                        new_frame_number
+                    )
+                    helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                    frames_captured += 1
+                    print(f"  Layer {layer.info}: Frame {current_frame} copiado")
+                except Exception as e:
+                    print(f"  Layer {layer.info}: Erro ao copiar - {str(e)}")
+                    # Fallback: criar frame vazio
+                    new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                    helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+            else:
+                # Se não tem frame nesta layer, criar vazio
+                new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                print(f"  Layer {layer.info}: Frame vazio criado (sem frame em {current_frame})")
+            
+            layers_processed += 1
+        
+        # Gerar preview do novo frame
+        helpers.generate_library_preview(obj, new_frame_number)
+        
+        # IMPORTANTE: Não mudar o offset! Permanece no frame positivo
+        
+        # Forçar atualização da UI
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        self.report({'INFO'}, 
+                   f"Frame {current_frame} capturado → Biblioteca {new_frame_number} "
+                   f"({frames_captured} layers com conteúdo)")
+        
+        return {'FINISHED'}
+
 #region Old
 
     # EU, digo EU. Tiraria isso aqui vai na fé
@@ -815,6 +897,23 @@ class TIME_OFFSET_PT_main_panel(Panel):
         row.prop(time_mod, "show_viewport", text="", toggle=True)
         row.prop(time_mod, "show_render", text="", toggle=True)
 
+        col = layout.column(align=True)
+        col.operator("time_offset.create_clean_frame", icon='ADD')
+        col.operator("time_offset.duplicate_current_frame",
+                    text=f"Duplicar Frame {library_frame}",
+                    icon='DUPLICATE')
+
+        # NOVO BOTÃO: Capturar frame atual
+        row = col.row(align=True)
+        row.operator("time_offset.capture_to_library", 
+                    text=f"Capturar Frame {context.scene.frame_current}",
+                    icon='IMPORT')
+        row.prop(time_mod, "show_viewport", text="", icon='RESTRICT_VIEW_OFF')
+
+        col.operator("time_offset.update_current_preview", 
+                    text="Atualizar Preview Atual", 
+                    icon='FILE_REFRESH')
+
         # Botões de ação de frames
         col = layout.column(align=True)
         col.operator("time_offset.create_clean_frame", icon='ADD')
@@ -963,6 +1062,7 @@ class TIME_OFFSET_OT_update_current_preview(Operator):
 classes = (
     TIME_OFFSET_OT_create_clean_frame,
     TIME_OFFSET_OT_duplicate_current_frame,
+    TIME_OFFSET_OT_capture_to_library,
     TIME_OFFSET_OT_toggle_edit_mode,
     TIME_OFFSET_OT_navigate_previous,
     TIME_OFFSET_OT_navigate_next,
