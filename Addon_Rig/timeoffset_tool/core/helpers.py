@@ -1,5 +1,5 @@
 """
-Utility modules associated with timeoffset
+Modulo de Helpers para operadores
 """
 
 

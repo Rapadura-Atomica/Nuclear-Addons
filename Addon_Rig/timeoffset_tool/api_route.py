@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
+# all credits to NijiPen
 
 import bpy
 import random
