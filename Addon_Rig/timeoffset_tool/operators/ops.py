@@ -208,10 +208,386 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
         helpers.get_library_preview(obj, new_frame_number)
         return {'FINISHED'}
 
-class TIME_OFFSET_OT_capture_to_library(Operator):
-    """Captura o frame atual da timeline e armazena na biblioteca sem sair do frame atual"""
-    bl_idname = "time_offset.capture_to_library"
-    bl_label = "Capturar para Biblioteca"
+class TIME_OFFSET_OT_duplicate_current_positive(Operator):
+    """Duplica o frame atual da timeline, criando uma cópia para edição no mesmo frame"""
+    bl_idname = "time_offset.duplicate_current_positive"
+    bl_label = "Duplicar Frame Atual"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and gp_api.obj_is_gp(obj)
+
+    def execute(self, context):
+        obj = context.active_object
+        current_frame = context.scene.frame_current
+        
+        print(f"\n=== Duplicando frame {current_frame} para edição local ===")
+        
+        layers_processed = 0
+        frames_duplicated = 0
+        
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                print(f"  Layer {layer.info}: SKIPPED (locked/hidden)")
+                continue
+            
+            # Encontrar o frame atual
+            src_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == current_frame:
+                    src_frame = frame
+                    break
+            
+            if src_frame and gp_api.is_frame_valid(src_frame):
+                # Verificar se tem conteúdo
+                if hasattr(src_frame, 'strokes'):  # GPv2
+                    stroke_count = len(src_frame.strokes)
+                    print(f"  Layer {layer.info}: GPv2 com {stroke_count} strokes")
+                    
+                    if stroke_count > 0:
+                        # IMPORTANTE: NÃO limpar o frame! Queremos DUPLICAR, não substituir
+                        # Vamos copiar os strokes existentes para o MESMO frame
+                        
+                        # Criar uma lista dos strokes existentes para não modificar durante iteração
+                        existing_strokes = list(src_frame.strokes)
+                        
+                        for src_stroke in existing_strokes:
+                            # Copiar cada stroke
+                            new_stroke = src_frame.strokes.copy(src_stroke)
+                            print(f"    Stroke copiado")
+                        
+                        frames_duplicated += 1
+                        print(f"  Layer {layer.info}: {stroke_count} strokes duplicados (agora {len(src_frame.strokes)} total)")
+                    
+                elif hasattr(src_frame, 'nuclear_strokes'):  # GPv3
+                    stroke_count = len(list(src_frame.nuclear_strokes))
+                    print(f"  Layer {layer.info}: GPv3 com {stroke_count} strokes")
+                    
+                    if stroke_count > 0 and hasattr(src_frame, 'drawing'):
+                        drawing = src_frame.drawing
+                        existing_strokes = list(drawing.strokes)
+                        
+                        for src_stroke in existing_strokes:
+                            # Criar novo stroke
+                            new_stroke = drawing.strokes.new()
+                            # Copiar pontos
+                            for src_point in src_stroke.points:
+                                new_point = new_stroke.points.new()
+                                new_point.position = src_point.position.copy()
+                            print(f"    Stroke copiado")
+                        
+                        frames_duplicated += 1
+                        print(f"  Layer {layer.info}: {stroke_count} strokes duplicados")
+            else:
+                print(f"  Layer {layer.info}: Frame {current_frame} não encontrado")
+            
+            layers_processed += 1
+        
+        print(f"=== Duplicação concluída: {frames_duplicated} layers processadas ===\n")
+        
+        self.report({'INFO'}, 
+                   f"Frame {current_frame} duplicado para edição local ({frames_duplicated} layers)")
+        
+        # Forçar atualização da viewport
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+class TIME_OFFSET_OT_bring_to_timeline(Operator):
+    """Traz o frame atual da biblioteca para a timeline para edição local"""
+    bl_idname = "time_offset.bring_to_timeline"
+    bl_label = "Trazer Frame para Timeline"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj) if obj else None
+        return obj and gp_api.obj_is_gp(obj) and time_mod and time_mod.offset < 0
+
+    def execute(self, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj)
+        
+        library_frame = time_mod.offset
+        timeline_frame = context.scene.frame_current
+        
+        print(f"\n=== Trazendo biblioteca {library_frame} → timeline {timeline_frame} ===")
+        
+        layers_processed = 0
+        frames_copied = 0
+        
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                continue
+            
+            # Encontrar frame origem na biblioteca
+            src_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == library_frame:
+                    src_frame = frame
+                    break
+            
+            if not src_frame:
+                print(f"  Layer {layer.info}: Frame {library_frame} não encontrado")
+                continue
+            
+            # Verificar se tem strokes via nuclear_strokes
+            if not hasattr(src_frame, 'nuclear_strokes'):
+                print(f"  Layer {layer.info}: Frame sem nuclear_strokes")
+                continue
+            
+            # Contar strokes
+            stroke_count = 0
+            src_strokes = []
+            for stroke in src_frame.nuclear_strokes:
+                src_strokes.append(stroke)
+                stroke_count += 1
+            
+            print(f"  Layer {layer.info}: {stroke_count} strokes encontrados")
+            
+            if stroke_count == 0:
+                continue
+            
+            # Verificar frame destino na timeline
+            dst_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == timeline_frame:
+                    dst_frame = frame
+                    break
+            
+            if dst_frame:
+                # Limpar frame existente
+                if hasattr(dst_frame, 'nuclear_strokes'):
+                    strokes_to_remove = []
+                    for stroke in dst_frame.nuclear_strokes:
+                        strokes_to_remove.append(stroke)
+                    
+                    for stroke in strokes_to_remove:
+                        dst_frame.nuclear_strokes.remove(stroke)
+                    
+                    print(f"    Frame {timeline_frame} existente limpo")
+            else:
+                # Criar novo frame
+                dst_frame = gp_api.new_active_frame(layer.frames, timeline_frame)
+                print(f"    Novo frame {timeline_frame} criado")
+            
+            # Copiar strokes
+            if dst_frame and hasattr(dst_frame, 'nuclear_strokes'):
+                for src_stroke in src_strokes:
+                    # Criar novo stroke
+                    new_stroke = dst_frame.nuclear_strokes.new()
+                    
+                    # Copiar pontos - usando add() em vez de new()
+                    if hasattr(src_stroke, 'points'):
+                        # Contar pontos para adicionar
+                        point_count = 0
+                        src_points = []
+                        for src_point in src_stroke.points:
+                            src_points.append(src_point)
+                            point_count += 1
+                        
+                        if point_count > 0:
+                            # Adicionar pontos de uma vez
+                            new_stroke.points.add(point_count)
+                            
+                            # Copiar dados dos pontos
+                            for i, src_point in enumerate(src_points):
+                                if hasattr(src_point, 'co'):
+                                    new_stroke.points[i].co = src_point.co.copy()
+                                if hasattr(src_point, 'pressure'):
+                                    new_stroke.points[i].pressure = src_point.pressure
+                                if hasattr(src_point, 'strength'):
+                                    new_stroke.points[i].strength = src_point.strength
+                
+                frames_copied += 1
+                print(f"    {stroke_count} strokes copiados")
+            
+            layers_processed += 1
+        
+        # Desligar modificador
+        if time_mod:
+            time_mod.show_viewport = False
+            print(f"  Modificador desligado para edição local")
+        
+        print(f"=== Concluído: {frames_copied} layers processadas ===\n")
+        
+        self.report({'INFO'}, 
+                   f"Frame {library_frame} da biblioteca copiado para timeline {timeline_frame}")
+        
+        # Forçar atualização
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+class TIME_OFFSET_OT_send_to_library(Operator):
+    """Envia o frame atual da timeline para a biblioteca como um novo frame"""
+    bl_idname = "time_offset.send_to_library"
+    bl_label = "Enviar para Biblioteca"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and gp_api.obj_is_gp(obj)
+
+    def execute(self, context):
+        obj = context.active_object
+        timeline_frame = context.scene.frame_current
+        
+        # Encontrar o frame MAIS NEGATIVO (menor número) para criar o NOVO
+        # Inicializar com 0 (nenhum frame negativo)
+        most_negative = 0
+        
+        # Primeiro, listar todos os frames negativos existentes
+        negative_frames = []
+        for layer in obj.data.layers:
+            for frame in layer.frames:
+                if frame.frame_number < 0:
+                    negative_frames.append(frame.frame_number)
+                    # Atualizar o mais negativo
+                    if frame.frame_number < most_negative:
+                        most_negative = frame.frame_number
+        
+        print(f"  Frames negativos existentes: {sorted(set(negative_frames))}")
+        print(f"  Frame mais negativo atual: {most_negative}")
+        
+        # O novo frame será 1 a mais negativo que o mais negativo atual
+        # Se most_negative for 0 (não há frames negativos), começa com -1
+        if most_negative == 0:
+            new_library_frame = -1
+        else:
+            new_library_frame = most_negative - 1
+            
+        new_pose_id = uuid.uuid4().hex
+        
+        print(f"  Novo frame da biblioteca: {new_library_frame}")
+        print(f"  Novo pose_id: {new_pose_id}")
+        print(f"\n=== Enviando timeline {timeline_frame} → biblioteca {new_library_frame} ===")
+        
+        layers_processed = 0
+        frames_sent = 0
+        
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                print(f"  Layer {layer.info}: ignorada (locked/hidden)")
+                continue
+            
+            # Encontrar frame origem na timeline
+            src_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == timeline_frame:
+                    src_frame = frame
+                    break
+            
+            if not src_frame:
+                print(f"  Layer {layer.info}: Frame {timeline_frame} não encontrado")
+                continue
+            
+            # Verificar strokes via nuclear_strokes
+            if not hasattr(src_frame, 'nuclear_strokes'):
+                print(f"  Layer {layer.info}: sem nuclear_strokes")
+                continue
+            
+            # Contar strokes
+            stroke_count = 0
+            src_strokes = []
+            for stroke in src_frame.nuclear_strokes:
+                src_strokes.append(stroke)
+                stroke_count += 1
+            
+            print(f"  Layer {layer.info}: {stroke_count} strokes encontrados")
+            
+            if stroke_count == 0:
+                continue
+            
+            # VERIFICAR SE O FRAME DESTINO JÁ EXISTE
+            frame_exists = False
+            for frame in layer.frames:
+                if frame.frame_number == new_library_frame:
+                    frame_exists = True
+                    print(f"    AVISO: Frame {new_library_frame} já existe nesta layer!")
+                    break
+            
+            if frame_exists:
+                print(f"    Pulando layer {layer.info} - frame já existe")
+                continue
+            
+            # Criar novo frame na biblioteca
+            print(f"    Criando novo frame {new_library_frame}...")
+            new_frame = gp_api.new_active_frame(layer.frames, new_library_frame)
+            
+            # Copiar strokes
+            if new_frame and hasattr(new_frame, 'nuclear_strokes'):
+                for src_stroke in src_strokes:
+                    new_stroke = new_frame.nuclear_strokes.new()
+                    
+                    if hasattr(src_stroke, 'points'):
+                        # Contar pontos
+                        point_count = 0
+                        src_points = []
+                        for src_point in src_stroke.points:
+                            src_points.append(src_point)
+                            point_count += 1
+                        
+                        if point_count > 0:
+                            # Adicionar pontos de uma vez
+                            new_stroke.points.add(point_count)
+                            
+                            # Copiar dados
+                            for i, src_point in enumerate(src_points):
+                                if hasattr(src_point, 'co'):
+                                    new_stroke.points[i].co = src_point.co.copy()
+                                if hasattr(src_point, 'pressure'):
+                                    new_stroke.points[i].pressure = src_point.pressure
+                                if hasattr(src_point, 'strength'):
+                                    new_stroke.points[i].strength = src_point.strength
+                
+                helpers.set_pose_id(obj, new_library_frame, new_pose_id)
+                frames_sent += 1
+                print(f"    {stroke_count} strokes enviados para biblioteca")
+            
+            layers_processed += 1
+        
+        # Gerar preview apenas se enviou algo
+        if frames_sent > 0:
+            print(f"\n  Gerando preview para frame {new_library_frame}...")
+            helpers.generate_library_preview(obj, new_library_frame)
+        
+        print(f"\n=== RESUMO ===")
+        print(f"  Layers processadas: {layers_processed}")
+        print(f"  Frames enviados: {frames_sent}")
+        print(f"  Novo frame da biblioteca: {new_library_frame}")
+        
+        # Listar frames negativos atualizados
+        updated_negatives = []
+        for layer in obj.data.layers:
+            for frame in layer.frames:
+                if frame.frame_number < 0:
+                    updated_negatives.append(frame.frame_number)
+        print(f"  Frames negativos agora: {sorted(set(updated_negatives))}")
+        print("=== CONCLUÍDO ===\n")
+        
+        self.report({'INFO'}, 
+                   f"Timeline {timeline_frame} enviado para biblioteca {new_library_frame}")
+        
+        # Forçar atualização
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+class TIME_OFFSET_OT_capture_edited_to_library(Operator):
+    """Envia a versão editada do frame atual para a biblioteca"""
+    bl_idname = "time_offset.capture_edited_to_library"
+    bl_label = "Enviar Edição para Biblioteca"
     bl_options = {'REGISTER', 'UNDO'}
 
     @classmethod
@@ -235,58 +611,111 @@ class TIME_OFFSET_OT_capture_to_library(Operator):
         
         layers_processed = 0
         frames_captured = 0
+        frames_with_content = 0
         
-        print(f"=== Capturando frame {current_frame} para {new_frame_number} ===")
+        print(f"=== Enviando edição do frame {current_frame} para biblioteca {new_frame_number} ===")
         
         for layer in obj.data.layers:
             if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
                 continue
-                
-            # Verificar se existe um frame no número atual
+            
+            # Encontrar o frame atual (editado)
             src_frame = None
             for frame in layer.frames:
                 if frame.frame_number == current_frame:
                     src_frame = frame
                     break
             
-            if src_frame and gp_api.is_frame_valid(src_frame):
-                # Se existe frame, copiar seu conteúdo
-                try:
-                    new_frame = gp_api.copy_frame(
-                        layer.frames, 
-                        src_frame, 
-                        current_frame,  # Este é o frame_number de origem
-                        new_frame_number
-                    )
-                    helpers.set_pose_id(obj, new_frame_number, new_pose_id)
-                    frames_captured += 1
-                    print(f"  Layer {layer.info}: Frame {current_frame} copiado")
-                except Exception as e:
-                    print(f"  Layer {layer.info}: Erro ao copiar - {str(e)}")
-                    # Fallback: criar frame vazio
+            if src_frame:
+                # Verificar se tem conteúdo
+                has_content = False
+                stroke_count = 0
+                
+                if hasattr(src_frame, 'strokes'):  # GPv2
+                    stroke_count = len(src_frame.strokes)
+                    has_content = stroke_count > 0
+                    print(f"  Layer {layer.info}: GPv2 com {stroke_count} strokes")
+                elif hasattr(src_frame, 'nuclear_strokes'):  # GPv3
+                    stroke_count = len(list(src_frame.nuclear_strokes))
+                    has_content = stroke_count > 0
+                    print(f"  Layer {layer.info}: GPv3 com {stroke_count} strokes")
+                
+                if has_content:
+                    frames_with_content += 1
+                    
+                    # PARA GPv2 - método direto
+                    if hasattr(src_frame, 'strokes'):
+                        try:
+                            # Criar novo frame
+                            new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                            
+                            # Copiar strokes manualmente
+                            for src_stroke in src_frame.strokes:
+                                new_stroke = new_frame.strokes.copy(src_stroke)
+                            
+                            helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                            frames_captured += 1
+                            print(f"  Layer {layer.info}: {stroke_count} strokes copiados manualmente")
+                            
+                        except Exception as e:
+                            print(f"  Layer {layer.info}: Erro na cópia manual - {str(e)}")
+                    
+                    # PARA GPv3 - via nuclear_strokes
+                    elif hasattr(src_frame, 'nuclear_strokes'):
+                        try:
+                            new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                            
+                            # Acessar o drawing
+                            if hasattr(src_frame, 'drawing') and src_frame.drawing:
+                                src_drawing = src_frame.drawing
+                                dst_drawing = new_frame.drawing
+                                
+                                # Copiar strokes
+                                for src_stroke in src_drawing.strokes:
+                                    new_stroke = dst_drawing.strokes.new()
+                                    # Copiar pontos
+                                    for src_point in src_stroke.points:
+                                        new_point = new_stroke.points.new()
+                                        new_point.position = src_point.position.copy()
+                            
+                            helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                            frames_captured += 1
+                            print(f"  Layer {layer.info}: GPv3 copiado via drawing")
+                            
+                        except Exception as e:
+                            print(f"  Layer {layer.info}: Erro GPv3 - {str(e)}")
+                else:
+                    # Frame sem conteúdo, criar vazio
                     new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
                     helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                    print(f"  Layer {layer.info}: Frame vazio criado")
             else:
-                # Se não tem frame nesta layer, criar vazio
+                # Não tem frame na layer, criar vazio
                 new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
                 helpers.set_pose_id(obj, new_frame_number, new_pose_id)
-                print(f"  Layer {layer.info}: Frame vazio criado (sem frame em {current_frame})")
+                print(f"  Layer {layer.info}: Frame vazio criado (sem frame origem)")
             
             layers_processed += 1
         
-        # Gerar preview do novo frame
+        # Gerar preview
+        print(f"=== Gerando preview para frame {new_frame_number} ===")
         helpers.generate_library_preview(obj, new_frame_number)
         
-        # IMPORTANTE: Não mudar o offset! Permanece no frame positivo
+        # Verificar se o preview foi criado
+        preview_key = helpers.get_library_preview(obj, new_frame_number)
+        if preview_key:
+            print(f"✓ Preview gerado com sucesso")
+        else:
+            print(f"✗ Preview não foi gerado")
+        
+        self.report({'INFO'}, 
+                   f"Edição do frame {current_frame} enviada para biblioteca {new_frame_number} "
+                   f"({frames_captured} layers com conteúdo de {frames_with_content} layers com conteúdo original)")
         
         # Forçar atualização da UI
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
-        
-        self.report({'INFO'}, 
-                   f"Frame {current_frame} capturado → Biblioteca {new_frame_number} "
-                   f"({frames_captured} layers com conteúdo)")
         
         return {'FINISHED'}
 
@@ -840,22 +1269,26 @@ class TIME_OFFSET_PT_main_panel(Panel):
         time_mod = helpers.get_time_offset_modifier(obj)
 
         if not time_mod:
-                box = layout.box()
-                box.alert = True
-                box.label(text="Modificador TimeOffset não encontrado!", icon='ERROR')
-                box.label(text="Adicione o modificador para usar as funções completas")
-                box.operator("object.gpencil_modifier_add", text="Adicionar TimeOffset").type = 'GP_TIME'
-                return
+            box = layout.box()
+            box.alert = True
+            box.label(text="Modificador TimeOffset não encontrado!", icon='ERROR')
+            box.label(text="Adicione o modificador para usar as funções completas")
+            box.operator("object.gpencil_modifier_add", text="Adicionar TimeOffset").type = 'GP_TIME'
+            return
 
         library_frame = time_mod.offset
+        current_frame = context.scene.frame_current
 
+        # ============================================
+        # PREVIEW DO FRAME DA BIBLIOTECA
+        # ============================================
         layout.separator()
         preview_key = helpers.get_library_preview(obj, library_frame)
         pcoll = helpers.get_preview_collection()    
 
         if preview_key and preview_key in pcoll:
             preview_box = layout.box()
-            preview_box.label(text="Preview do Frame", icon='IMAGE_DATA')
+            preview_box.label(text=f"Preview Frame {library_frame}", icon='IMAGE_DATA')
             preview_box.template_icon(
                 icon_value=pcoll[preview_key].icon_id,
                 scale=6
@@ -863,18 +1296,17 @@ class TIME_OFFSET_PT_main_panel(Panel):
         else:
             preview_box = layout.box()
             preview_box.label(text="Preview indisponível", icon='IMAGE_DATA')
-            print(helpers.get_library_preview)
             preview_box.label(text=f"Frame {library_frame}")
 
-
-        # Informações do modificador
+        # ============================================
+        # INFORMAÇÕES DA BIBLIOTECA
+        # ============================================
         box = layout.box()
         box.label(text="Biblioteca de Frames", icon='LIBRARY_DATA_DIRECT')
 
         # Status da biblioteca
         has_library_frames = helpers.has_negative_frames(obj)
         if has_library_frames:
-            # Encontrar range da biblioteca
             min_frame, max_frame = helpers.get_library_frame_range(obj)
             box.label(text=f"Biblioteca: {min_frame} a {max_frame}", icon='BOOKMARKS')
         else:
@@ -887,84 +1319,144 @@ class TIME_OFFSET_PT_main_panel(Panel):
         anim_icon = 'ANIM' if is_animated else 'KEYFRAME'
         box.label(text=f"Animado: {'SIM' if is_animated else 'NÃO'}", icon=anim_icon)
 
-        # Informação sobre o frame atual da biblioteca
-        box.separator()
-        box.label(text=f"Exibindo Frame da Biblioteca: {library_frame}", icon='RESTRICT_VIEW_OFF')
+        # ============================================
+        # CONTROLES DE EDIÇÃO
+        # ============================================
+        layout.separator()
+        layout.label(text="Controles de Edição", icon='TOOL_SETTINGS')
+        
+        # Toggle do modificador
+        row = layout.row(align=True)
+        row.prop(time_mod, "show_in_editmode", text="Editar", toggle=True)
+        row.prop(time_mod, "show_viewport", text="Visualizar", toggle=True)
+        row.prop(time_mod, "show_render", text="Render", toggle=True)
 
-        # Controles de edição
-        row = layout.row()
-        row.prop(time_mod, "show_in_editmode", text="Permitir Edição", toggle=True)
-        row.prop(time_mod, "show_viewport", text="", toggle=True)
-        row.prop(time_mod, "show_render", text="", toggle=True)
-
+        # ============================================
+        # GERENCIAMENTO DE FRAMES (POSITIVO → BIBLIOTECA)
+        # ============================================
+        layout.separator()
+        layout.label(text="Frame Positivo → Biblioteca", icon='FORWARD')
+        
         col = layout.column(align=True)
-        col.operator("time_offset.create_clean_frame", icon='ADD')
-        col.operator("time_offset.duplicate_current_frame",
-                    text=f"Duplicar Frame {library_frame}",
-                    icon='DUPLICATE')
-
-        # NOVO BOTÃO: Capturar frame atual
+        
+        # Duplicar frame atual para edição local
+        col.operator(
+            "time_offset.duplicate_current_positive", 
+            text=f"Duplicar Frame {current_frame} (Edição Local)",
+            icon='DUPLICATE'
+        )
+        
+        # Enviar edição para biblioteca
         row = col.row(align=True)
-        row.operator("time_offset.capture_to_library", 
-                    text=f"Capturar Frame {context.scene.frame_current}",
-                    icon='IMPORT')
+        row.operator(
+            "time_offset.capture_edited_to_library", 
+            text=f"Enviar Frame {current_frame} para Biblioteca",
+            icon='EXPORT'
+        )
         row.prop(time_mod, "show_viewport", text="", icon='RESTRICT_VIEW_OFF')
 
-        col.operator("time_offset.update_current_preview", 
-                    text="Atualizar Preview Atual", 
-                    icon='FILE_REFRESH')
-
-        # Botões de ação de frames
-        col = layout.column(align=True)
-        col.operator("time_offset.create_clean_frame", icon='ADD')
-        col.operator("time_offset.duplicate_current_frame",
-                     text=f"Duplicar Frame {library_frame}",
-                     icon='DUPLICATE')
-        col.operator("time_offset.update_current_preview", 
-                     text="Atualizar Preview Atual", 
-                     icon='FILE_REFRESH')  # ícone de refresh/atualizar
-        # Nova feature: Flip Horizontal
-        col.operator("time_offset.flip_horizontal", text="Flip Horizontal", icon='UV_SYNC_SELECT')  # Icon para flip
-
-        col = layout.column(align=True)
-        col.operator("time_offset.assign_all_frames", 
-                    text="Assign Todos Frames", 
-                    icon='GROUP_VERTEX')
+        # ============================================
+        # GERENCIAMENTO DA BIBLIOTECA (FRAMES NEGATIVOS)
+        # ============================================
+        layout.separator()
+        layout.label(text="Biblioteca (Frames Negativos)", icon='LIBRARY_DATA_DIRECT')
         
-        # Navegação na biblioteca
+        col = layout.column(align=True)
+        
+        # Criar novo frame limpo
+        col.operator("time_offset.create_clean_frame", icon='ADD')
+        
+        # Duplicar frame atual da biblioteca
+        col.operator(
+            "time_offset.duplicate_current_frame",
+            text=f"Duplicar Frame {library_frame} (Biblioteca)",
+            icon='COPY_ID'
+        )
+        
+        # Seção: Biblioteca → Timeline (Edição)
+        layout.separator()
+        layout.label(text="Editar Frame da Biblioteca", icon='GREASEPENCIL')
+
+        col = layout.column(align=True)
+        # Trazer frame da biblioteca para timeline
+        col.operator(
+            "time_offset.bring_to_timeline",
+            text=f"Trazer Frame {library_frame} para Timeline {current_frame}",
+            icon='COPYDOWN'
+        )
+
+        # Desligar modificador automaticamente (já faz no operador)
+        col.prop(time_mod, "show_viewport", text="Ver Edição Local", icon='RESTRICT_VIEW_OFF')
+
+        # Seção: Timeline → Biblioteca (Salvar)
+        layout.separator()
+        layout.label(text="Salvar na Biblioteca", icon='EXPORT')
+
+        col = layout.column(align=True)
+        # Enviar timeline para biblioteca
+        col.operator(
+            "time_offset.send_to_library",
+            text=f"Enviar Frame {current_frame} para Biblioteca",
+            icon='IMPORT'
+        )
+
+        # Atualizar preview
+        col.operator(
+            "time_offset.update_current_preview", 
+            text="Atualizar Preview Atual", 
+            icon='FILE_REFRESH'
+        )
+
+        # ============================================
+        # NAVEGAÇÃO NA BIBLIOTECA
+        # ============================================
+        layout.separator()
+        layout.label(text="Navegação na Biblioteca", icon='VIEW_PAN')
+        
         col = layout.column(align=True)
         row = col.row(align=True)
         row.operator("time_offset.navigate_previous", text="Anterior", icon='TRIA_LEFT')
         row.operator("time_offset.navigate_next", text="Próximo", icon='TRIA_RIGHT')
-
-        # Botão para ir ao primeiro frame da biblioteca
         col.operator("time_offset.go_to_first_library_frame", text="Primeiro da Biblioteca", icon='REW')
 
-        # Seção de animação
+        # ============================================
+        # FERRAMENTAS EXTRAS
+        # ============================================
+        layout.separator()
+        layout.label(text="Ferramentas Extras", icon='TOOL_SETTINGS')
+        
+        col = layout.column(align=True)
+        col.operator("time_offset.flip_horizontal", text="Flip Horizontal", icon='UV_SYNC_SELECT')
+        col.operator("time_offset.assign_all_frames", text="Assign Todos Frames", icon='GROUP_VERTEX')
+
+        # ============================================
+        # ANIMAÇÃO DO OFFSET
+        # ============================================
         layout.separator()
         layout.label(text="Animação do Offset", icon='ANIM')
+        
         col = layout.column(align=True)
         if is_animated:
-            # Já está animado - mostrar controles de animação
             row = col.row(align=True)
             row.operator("time_offset.animate_offset", text="Add Keyframe", icon='KEYFRAME')
             row.operator("time_offset.remove_animation", text="", icon='X')
 
-            # Navegação entre keyframes
             row = col.row(align=True)
             row.operator("time_offset.previous_keyframe", text="", icon='PREV_KEYFRAME')
             row.operator("time_offset.next_keyframe", text="", icon='NEXT_KEYFRAME')
         else:
-            # Não está animado - botão para iniciar animação
             col.operator("time_offset.animate_offset", text="Iniciar Animação", icon='KEYFRAME_HLT')
 
-        # Status atual da timeline
+        # ============================================
+        # STATUS DA TIMELINE
+        # ============================================
         layout.separator()
-        current_frame = context.scene.frame_current
-        # Calcular frame máximo positivo (timeline normal)
         max_positive_frame = helpers.get_max_positive_frame_number(obj)
-        layout.label(text=f"Timeline: Frame {current_frame}", icon='TIME')
-        layout.label(text=f"Frames positivos: 0 a {max_positive_frame}", icon='PMARKER')
+        
+        box = layout.box()
+        box.label(text=f"Timeline: Frame {current_frame}", icon='TIME')
+        box.label(text=f"Frames positivos: 0 a {max_positive_frame}", icon='PMARKER')
+        box.label(text=f"Biblioteca atual: {library_frame}", icon='BOOKMARKS')
 
 class TIME_OFFSET_PT_missing_modifier(Panel):
     """Painel de aviso quando não há modificador TimeOffset"""
@@ -1062,7 +1554,10 @@ class TIME_OFFSET_OT_update_current_preview(Operator):
 classes = (
     TIME_OFFSET_OT_create_clean_frame,
     TIME_OFFSET_OT_duplicate_current_frame,
-    TIME_OFFSET_OT_capture_to_library,
+    TIME_OFFSET_OT_bring_to_timeline,
+    TIME_OFFSET_OT_send_to_library,
+    TIME_OFFSET_OT_duplicate_current_positive,
+    TIME_OFFSET_OT_capture_edited_to_library,
     TIME_OFFSET_OT_toggle_edit_mode,
     TIME_OFFSET_OT_navigate_previous,
     TIME_OFFSET_OT_navigate_next,
