@@ -1183,67 +1183,117 @@ class TIME_OFFSET_OT_remove_keyframe_timeline(Operator):
         except Exception as e:
             self.report({'ERROR'}, f"Erro ao remover keyframes: {str(e)}")
             return {'CANCELLED'}
-        
+
 class TIME_OFFSET_OT_assign_all_frames(Operator):
-    """Assign automático de TODOS os frames para os vertex groups correspondentes"""
+    """Assign automático de TODOS os keyframes selecionados para o vertex group ativo"""
     bl_idname = "time_offset.assign_all_frames"
-    bl_label = "Assign Todos Frames"
+    bl_label = "Assign Keyframes Selecionados"
     bl_options = {'REGISTER', 'UNDO'}
     
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return obj and gp_api.obj_is_gp(obj) and obj.vertex_groups
+        # Só permite em Edit Mode, com vertex group ativo e multi-frame ativado
+        return (obj and gp_api.obj_is_gp(obj) and 
+                obj.mode == 'EDIT' and
+                gp_api.get_multiedit(obj))  # Usar função do api_route
     
     def execute(self, context):
         obj = context.active_object
-        total_assignments = 0
-        layers_processed = 0
+        active_vgroup = obj.vertex_groups.active
+        
+        if not active_vgroup:
+            self.report({'WARNING'}, "Nenhum vertex group ativo selecionado")
+            return {'CANCELLED'}
+        
+        print(f"\n=== Assign Multi-Frame para grupo '{active_vgroup.name}' ===")
+        
+        # Guardar estado original
+        old_frame = context.scene.frame_current
+        frames_assigned = 0
+        total_strokes = 0
+        
+        # Coletar TODOS os frames que estão em multi-frame editing
+        frames_to_process = set()
         
         for layer in obj.data.layers:
             if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
                 continue
-                
-            layer_name = self.normalize_name(layer.info)
-            matching_groups = self.find_matching_groups(obj, layer_name)
-            
-            if not matching_groups:
-                continue
             
             for frame in layer.frames:
-                for vgroup in matching_groups:
-                    if self.assign_frame_to_group(obj, frame, vgroup):
-                        total_assignments += 1
+                # No multi-frame editing, todos os frames são considerados
+                frames_to_process.add(frame.frame_number)
+        
+        print(f"  Frames encontrados: {sorted(frames_to_process)}")
+        
+        if not frames_to_process:
+            self.report({'WARNING'}, "Nenhum frame encontrado")
+            return {'CANCELLED'}
+        
+        # Processar cada frame
+        for frame_number in sorted(frames_to_process):
+            # Ir para o frame
+            context.scene.frame_current = frame_number
+            context.view_layer.update()
             
-            layers_processed += 1
+            # Usar api_route para selecionar tudo
+            try:
+                gp_api.op_select_all()  # Usar função do api_route
+            except:
+                # Fallback: tentar método alternativo
+                try:
+                    bpy.ops.grease_pencil.select_all(action='SELECT')
+                except:
+                    print(f"  Frame {frame_number}: não foi possível selecionar")
+                    continue
+            
+            # Verificar se há algo selecionado (opcional - pode pular para performance)
+            has_selection = True  # Assumir que tem seleção
+            
+            if has_selection:
+                # Executar o assign
+                try:
+                    # O assign ainda é o mesmo operador
+                    bpy.ops.object.vertex_group_assign()
+                    frames_assigned += 1
+                    
+                    # Contar strokes (opcional, para relatório)
+                    stroke_count = 0
+                    for layer in obj.data.layers:
+                        for frame in layer.frames:
+                            if frame.frame_number == frame_number:
+                                if hasattr(frame, 'strokes'):
+                                    stroke_count = len(frame.strokes)
+                                elif hasattr(frame, 'nuclear_strokes'):
+                                    stroke_count = len(list(frame.nuclear_strokes))
+                                break
+                    
+                    total_strokes += stroke_count
+                    print(f"  Frame {frame_number}: assign realizado ({stroke_count} strokes)")
+                    
+                except Exception as e:
+                    print(f"  Frame {frame_number}: erro no assign - {e}")
+            
+            # Deselecionar para o próximo frame
+            try:
+                gp_api.op_deselect()  # Usar função do api_route
+            except:
+                try:
+                    bpy.ops.grease_pencil.select_all(action='DESELECT')
+                except:
+                    pass
+        
+        # Restaurar frame original
+        context.scene.frame_current = old_frame
+        context.view_layer.update()
+        
+        print(f"=== Concluído: {frames_assigned} frames processados, {total_strokes} strokes assignados ===\n")
         
         self.report({'INFO'}, 
-                   f"Assign completo: {total_assignments} atribuições em {layers_processed} layers")
+                   f"Assign: {frames_assigned} frames para grupo '{active_vgroup.name}' "
+                   f"({total_strokes} strokes)")
+        
         return {'FINISHED'}
-    
-    def normalize_name(self, name):
-        return name.lower().strip().replace(' ', '_')
-    
-    def find_matching_groups(self, obj, layer_name):
-        matching = []
-        for vgroup in obj.vertex_groups:
-            vgroup_name = self.normalize_name(vgroup.name)
-            if layer_name == vgroup_name or vgroup_name in layer_name:
-                matching.append(vgroup)
-        return matching
-    
-    def assign_frame_to_group(self, obj, frame, vgroup):
-        try:
-            if hasattr(frame, 'strokes'):
-                for stroke in frame.strokes:
-                    stroke.vertex_groups.append(vgroup)
-            elif hasattr(frame, 'nuclear_strokes'):
-                for stroke in frame.nuclear_strokes:
-                    # GPv3 - implementação específica
-                    pass
-            return True
-        except:
-            return False
 
 class TIME_OFFSET_PT_main_panel(Panel):
     """Painel principal do TimeOffset Tool"""
