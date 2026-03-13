@@ -3,6 +3,7 @@
 
 import bpy
 from bpy.types import Operator, Panel
+from mathutils import Vector
 from .. import api_route as gp_api
 import bpy_extras.anim_utils as anim_utils
 from ..core import helpers
@@ -802,6 +803,78 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
         else:
             self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframe na escala")
 
+        return {'FINISHED'}
+
+"""Operador pq a May pediu"""
+class TIME_OFFSET_OT_flip_horizontal_object(Operator):
+    """Flip horizontal do objeto selecionado (Numpad 4) - aplica escala -1 no eixo adequado"""
+    bl_idname = "time_offset.flip_horizontal_object"
+    bl_label = "Flip Horizontal (Object)"
+    bl_description = "Flip horizontal do objeto ativo (escala X ou Y = -1 baseado na orientação)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'OBJECT' and
+                context.object is not None)
+
+    def execute(self, context):
+        obj = context.object
+        
+        if not obj:
+            self.report({'WARNING'}, "Selecione um objeto")
+            return {'CANCELLED'}
+        
+        # Pegar a matriz do objeto no espaço global
+        matrix = obj.matrix_world
+        
+        # Extrair vetores de direção dos eixos locais
+        x_axis = matrix.to_3x3() @ Vector((1, 0, 0))
+        y_axis = matrix.to_3x3() @ Vector((0, 1, 0))
+        z_axis = matrix.to_3x3() @ Vector((0, 0, 1))
+        
+        # Normalizar
+        x_axis.normalize()
+        y_axis.normalize()
+        z_axis.normalize()
+        
+        # Calcular quanto cada eixo local aponta para a direita (X global)
+        # Queremos o eixo que tem o MAIOR componente no X global
+        right_alignment = {
+            'X': abs(x_axis.x),  # Quanto do eixo X local aponta para X global
+            'Y': abs(y_axis.x),  # Quanto do eixo Y local aponta para X global
+            'Z': abs(z_axis.x)   # Quanto do eixo Z local aponta para X global
+        }
+        
+        # Escolher o eixo mais alinhado com a direita (X global)
+        flip_axis = max(right_alignment, key=right_alignment.get)
+        
+        print(f"  Alinhamentos: X={right_alignment['X']:.2f}, Y={right_alignment['Y']:.2f}, Z={right_alignment['Z']:.2f}")
+        print(f"  Eixo escolhido para flip: {flip_axis}")
+        
+        # Aplicar flip no eixo escolhido
+        if flip_axis == 'X':
+            obj.scale.x *= -1.0
+        elif flip_axis == 'Y':
+            obj.scale.y *= -1.0
+        else:  # 'Z'
+            obj.scale.z *= -1.0
+        
+        # Keyframe na escala
+        current_frame = context.scene.frame_current
+        obj.keyframe_insert(data_path="scale", frame=current_frame)
+        
+        # Se for um Grease Pencil, também keyframe no offset (se existir)
+        if gp_api.obj_is_gp(obj):
+            time_mod = helpers.get_time_offset_modifier(obj)
+            if time_mod:
+                time_mod.keyframe_insert(data_path="offset", frame=current_frame)
+                self.report({'INFO'}, f"Objeto '{obj.name}' flipado (eixo {flip_axis}) + keyframes (scale + offset)")
+            else:
+                self.report({'INFO'}, f"Objeto '{obj.name}' flipado (eixo {flip_axis}) + keyframe na escala")
+        else:
+            self.report({'INFO'}, f"Objeto '{obj.name}' flipado (eixo {flip_axis}) + keyframe na escala")
+        
         return {'FINISHED'}
 
 class TIME_OFFSET_OT_toggle_edit_mode(Operator):
@@ -1620,6 +1693,7 @@ classes = (
     TIME_OFFSET_OT_remove_keyframe_timeline,
     TIME_OFFSET_OT_assign_all_frames,
     TIME_OFFSET_OT_flip_horizontal,
+    TIME_OFFSET_OT_flip_horizontal_object,
     TIME_OFFSET_PT_main_panel,
     TIME_OFFSET_PT_missing_modifier,
     TIME_OFFSET_OT_update_current_preview,

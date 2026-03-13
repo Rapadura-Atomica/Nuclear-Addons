@@ -66,6 +66,7 @@ def register_keymaps():
             shift=True
         )
         keymaps.append((km, kmi_next_key))
+
         # Novo atalho para Flip Horizontal (NUMPAD_4)
         kmi_flip = km.keymap_items.new(
             "time_offset.flip_horizontal",
@@ -73,6 +74,14 @@ def register_keymaps():
             value='PRESS'
         )
         keymaps.append((km, kmi_flip))
+
+        kmi_flip_obj = km.keymap_items.new(
+        # Flip de objeto
+            "time_offset.flip_horizontal_object",
+            type='NUMPAD_4',
+            value='PRESS'
+        )
+        keymaps.append((km, kmi_flip_obj))
 
         # Insert Keyframe
         kmi_insert = km.keymap_items.new(
