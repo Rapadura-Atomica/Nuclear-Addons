@@ -15,55 +15,58 @@ class BBoxEventHandler:
     def set_active_operator(cls, operator):
         cls._active_operator = operator
     
+    # event_handler.py
     @classmethod
     def handle_event(cls, context, event, operator):
         """Processa eventos globais enquanto a BBox está ativa"""
-        print(f"[DEBUG EventHandler] Evento recebido: {event.type} | ctrl={event.ctrl} | shift={event.shift} | alt={event.alt} | value={event.value}")
-
-
-        # Permitir que eventos com SHIFT passem para seleção múltipla
-        if event.shift and event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            print(f"[DEBUG EventHandler] Decidindo PASS_THROUGH para {event.type} (Ctrl={event.ctrl})")
+        
+        # PERMITIR DELETE SEMPRE (com ou sem shift)
+        if event.type == 'DEL' and event.value == 'PRESS':
+            print("DEBUG: DELETE permitido passar")
             return {'PASS_THROUGH'}
-
-        # Se não há operador BBox ativo, não fazer nada
-        if not cls._active_operator:
-            return False
         
-        # Lista de eventos que devem passar através
-        pass_through_events = {
-            'X', 'DEL',                          # Delete
-            'Z',                                 # Undo/Redo
-            'A',                                 # Select All
-            'H',                                 # Hide
-            'G', 'R', 'S',                       # Transformações
-            'TAB',                               # Switch mode
-            'SPACE',                             # Tool menu
-        }
+        # PERMITIR X (tecla delete alternativa)
+        if event.type == 'X' and not event.ctrl and event.value == 'PRESS':
+            print("DEBUG: X permitido passar")
+            return {'PASS_THROUGH'}
         
-        # Eventos com modificadores que devem passar
-        modifier_events = {
-            ('C', True, False),    # Ctrl+C - Copy
-            ('V', True, False),    # Ctrl+V - Paste
-            ('Z', True, False),    # Ctrl+Z - Undo
-            ('Y', True, False),    # Ctrl+Y - Redo
-            ('A', True, False),    # Ctrl+A - Select All
-        }
+        # Permitir eventos com SHIFT para seleção múltipla
+        if event.shift and event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            return {'PASS_THROUGH'}
         
-        # Verificar eventos simples
-        if event.type in pass_through_events and event.value == 'PRESS':
-            print(f"[DEBUG EventHandler] Decidindo PASS_THROUGH para {event.type} (Ctrl={event.ctrl})")
-            return True
+        # PERMITIR CTRL+C, CTRL+V, CTRL+X (clipboard)
+        if event.ctrl and event.type in {'C', 'V', 'X'} and event.value == 'PRESS':
+            print(f"DEBUG: Ctrl+{event.type} permitido passar")
+            return {'PASS_THROUGH'}
         
-        # Verificar eventos com modificadores
-        event_key = (event.type, event.ctrl, event.shift)
-        if event_key in modifier_events and event.value == 'PRESS':
-            print(f"[DEBUG EventHandler] Decidindo PASS_THROUGH para {event.type} (Ctrl={event.ctrl})")
-            return True
+        # PERMITIR CTRL+Z (undo)
+        if event.ctrl and event.type == 'Z' and event.value == 'PRESS':
+            return {'PASS_THROUGH'}
         
-        # Permitir menu de contexto com botão direito
+        # PERMITIR tecla DEL sozinha (sem shift)
+        if event.type == 'DEL' and event.value == 'PRESS':
+            return {'PASS_THROUGH'}
+        
+        # Menu de contexto
         if event.type == 'RIGHTMOUSE' and event.value == 'PRESS':
-            print(f"[DEBUG EventHandler] Decidindo PASS_THROUGH para {event.type} (Ctrl={event.ctrl})")
-            return True
+            return {'PASS_THROUGH'}
         
+        # Navegação de câmera
+        if event.type in {'MIDDLEMOUSE', 'WHEELUPMOUSE', 'WHEELDOWNMOUSE'}:
+            return {'PASS_THROUGH'}
+        
+        # Outros eventos importantes
+        pass_through_events = {
+            'A',    # Select All
+            'H',    # Hide
+            'G', 'R', 'S',  # Transformações
+            'TAB',  # Switch mode
+            'SPACE', # Tool menu
+            'ESC',  # Cancel
+        }
+        
+        if event.type in pass_through_events and event.value == 'PRESS':
+            return {'PASS_THROUGH'}
+        
+        # Por padrão, bloqueia (BBox captura)
         return False
