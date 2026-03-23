@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
-# all credits to NijiPen
 
 import bpy
 import random
@@ -270,7 +269,7 @@ def op_select_all():
         bpy.ops.grease_pencil.select_all(action='SELECT')
     else:
         bpy.ops.gpencil.select_all(action='SELECT')
-    
+                
 def op_deselect():
     if bpy.app.version >= (4, 3, 0):
         bpy.ops.grease_pencil.select_all(action='DESELECT')
@@ -649,6 +648,57 @@ class LegacyStrokeCollection:
             stroke._index = -1
 
 #endregion
+
+def insert_gp_keyframe_if_auto(obj, frame=None):
+    """
+    Insere keyframe mínimo apenas na layer ativa (um único canal: Translation).
+    Minimiza poluição na timeline, sem criar canais para Rotation/Scale.
+    """
+    scene = bpy.context.scene
+    if not scene.tool_settings.use_keyframe_insert_auto:
+        return False
+
+    if frame is None:
+        frame = scene.frame_current
+
+    if not obj_is_gp(obj):
+        return False
+
+    gp_data = obj.data
+
+    if is_gpv3():
+        active_layer = gp_data.layers.active
+        if not active_layer:
+            return False
+
+        layer_name = active_layer.name or active_layer.info or "Layer ativa"
+
+        # Cria frame vazio só se necessário (sem copiar nada)
+        current_frame = active_layer.get_frame_at(frame)
+        if not current_frame:
+            current_frame = active_layer.frames.new(frame)
+            active_layer.current_frame_number = frame
+            print(f"GPv3: Frame vazio criado na '{layer_name}' (frame {frame})")
+
+        # Insere keyframe APENAS em translation (um canal só)
+        try:
+            active_layer.keyframe_insert(data_path="translation", frame=frame)
+            print(f"GPv3: Keyframe mínimo inserido na '{layer_name}' (frame {frame}) - canal Translation")
+        except Exception as e:
+            print(f"Erro ao inserir keyframe mínimo: {e}")
+            return False
+
+        if bpy.context.area:
+            bpy.context.area.tag_redraw()
+
+        return True
+
+    else:
+        # GPv2 legado
+        gp_data.keyframe_insert(data_path="layers", frame=frame)
+        if bpy.context.area:
+            bpy.context.area.tag_redraw()
+        return True
 
 def register_alternative_api_paths():
     """

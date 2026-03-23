@@ -3,119 +3,18 @@
 
 import bpy
 from bpy.types import Operator, Panel
+from mathutils import Vector
 from .. import api_route as gp_api
 import bpy_extras.anim_utils as anim_utils
 from ..core import helpers
 import os
 import uuid
 
-# Funções globais de overlay (para serem usadas por várias classes)
-def setup_timeline_overlay_global(context, timeline_frame, opacity):
-    """Versão global da função de overlay"""
-    obj = context.active_object
-    
-    # Determina o tipo correto do modificador
-    if bpy.app.version >= (4, 3, 0):
-        modifier_type = 'GREASE_PENCIL_TIME'
-    else:
-        modifier_type = 'GP_TIME'
-    
-    # Cria objeto ghost
-    temp_obj = obj.copy()
-    temp_obj.data = obj.data.copy()
-    temp_obj.name = f"GHOST_{obj.name}_ref_{timeline_frame}"
-    context.collection.objects.link(temp_obj)
-    
-    # Remove todos os modificadores
-    temp_obj.modifiers.clear()
-    
-    # Adiciona modificador TimeOffset
-    try:
-        mod = temp_obj.modifiers.new(name="GhostTimeOffset", type=modifier_type)
-        mod.offset = timeline_frame
-    except:
-        # Fallback para o outro tipo
-        alt_type = 'GP_TIME' if modifier_type == 'GREASE_PENCIL_TIME' else 'GREASE_PENCIL_TIME'
-        mod = temp_obj.modifiers.new(name="GhostTimeOffset", type=alt_type)
-        mod.offset = timeline_frame
-    
-    # Configura material transparente
-    mat = bpy.data.materials.new(name=f"GhostMat_{timeline_frame}")
-    mat.use_nodes = True
-    
-    if bpy.app.version >= (4, 3, 0):
-        # GPv3 - usa nodes
-        nodes = mat.node_tree.nodes
-        links = mat.node_tree.links
-        nodes.clear()
-        
-        rgb = nodes.new(type='ShaderNodeRGB')
-        rgb.outputs[0].default_value = (0.3, 0.6, 1.0, opacity)
-        
-        output = nodes.new(type='ShaderNodeOutputMaterial')
-        links.new(rgb.outputs[0], output.inputs[0])
-    else:
-        # GPv2
-        mat.grease_pencil.color = (0.3, 0.6, 1.0, opacity)
-    
-    temp_obj.active_material = mat
-    
-    # Configura ghost
-    temp_obj.hide_select = True
-    temp_obj.show_in_front = True
-    
-    # Salva referência
-    context.scene["timeoffset_ghost_object"] = temp_obj.name
-    
-    print(f"📌 Overlay ativado: frame {timeline_frame}")
-
-def disable_overlay_global(context):
-    """Versão global para desativar overlay"""
-    
-    # Remove objeto ghost
-    if "timeoffset_ghost_object" in context.scene:
-        ghost_name = context.scene["timeoffset_ghost_object"]
-        if ghost_name in bpy.data.objects:
-            bpy.data.objects.remove(bpy.data.objects[ghost_name])
-        del context.scene["timeoffset_ghost_object"]
-    
-    # Remove modifier temporário
-    if "timeoffset_overlay_modifier" in context.scene:
-        obj = context.active_object
-        mod_name = context.scene["timeoffset_overlay_modifier"]
-        if mod_name in obj.modifiers:
-            obj.modifiers.remove(obj.modifiers[mod_name])
-        del context.scene["timeoffset_overlay_modifier"]
-    
-    # Desativa onion skin
-    tool_settings = context.scene.tool_settings
-    if hasattr(tool_settings, 'use_grease_pencil_onion_skin'):
-        tool_settings.use_grease_pencil_onion_skin = False
-    if hasattr(tool_settings, 'gpencil_paint'):
-        gp_tool = tool_settings.gpencil_paint
-        if hasattr(gp_tool, 'use_onion_skinning'):
-            gp_tool.use_onion_skinning = False
-
 class TIME_OFFSET_OT_create_clean_frame(Operator):
     """Cria um novo frame limpo na biblioteca (frames negativos) para TODAS as layers"""
     bl_idname = "time_offset.create_clean_frame"
     bl_label = "Novo Frame na Biblioteca"
     bl_options = {'REGISTER', 'UNDO'}
-
-    use_reference: bpy.props.BoolProperty(
-        name="Usar frame atual como referência",
-        description="Copia o frame atual da timeline como overlay transparente",
-        default=True
-    ) #type: ignore
-    
-    reference_opacity: bpy.props.FloatProperty(
-        name="Opacidade da referência",
-        default=0.3,
-        min=0.1,
-        max=0.8,
-        precision=2,
-        subtype='FACTOR'
-    ) #type: ignore
 
     @classmethod
     def poll(cls, context):
@@ -125,16 +24,12 @@ class TIME_OFFSET_OT_create_clean_frame(Operator):
     def execute(self, context):
         pose_id = uuid.uuid4().hex
         obj = context.active_object
-        
-        # Frame atual da timeline (referência)
-        timeline_frame = context.scene.frame_current
-        
         if not obj.data.layers:
             self.report({'WARNING'}, "Nenhuma layer encontrada no objeto")
             return {'CANCELLED'}
 
         # Encontrar o menor frame number (mais negativo) entre TODAS as layers
-        first_negative_frame = 0
+        first_negative_frame = 0  # Começa com 0
         for layer in obj.data.layers:
             for frame in layer.frames:
                 if frame.frame_number < first_negative_frame:
@@ -153,39 +48,17 @@ class TIME_OFFSET_OT_create_clean_frame(Operator):
             # Criar novo frame
             new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
 
+            helpers.set_pose_id(obj, new_frame_number, pose_id)
+
             # Limpar strokes
             if gp_api.is_frame_valid(new_frame):
                 self.clear_frame_strokes(new_frame)
 
             layers_processed += 1
 
-        helpers.set_pose_id(obj, new_frame_number, pose_id)
+        self.report({'INFO'}, f"Frame {new_frame_number} criado na biblioteca ({layers_processed} layers)")
         
-        # Se usar referência, copia o frame atual como overlay
-        if self.use_reference:
-            self.copy_as_reference(
-                obj, 
-                timeline_frame, 
-                new_frame_number,
-                self.reference_opacity
-            )
-            # Salva ponto de retorno
-            context.scene["timeoffset_return_frame"] = timeline_frame
-            self.report({'INFO'}, 
-                f"Frame {new_frame_number} criado com referência do frame {timeline_frame} ({layers_processed} layers)")
-        else:
-            self.report({'INFO'}, f"Frame {new_frame_number} criado na biblioteca ({layers_processed} layers)")
-        
-        # Vai para o novo frame na biblioteca
-        time_mod = helpers.get_time_offset_modifier(obj)
-        if time_mod:
-            time_mod.offset = new_frame_number
-        
-        try:
-            helpers.generate_library_preview(obj, new_frame_number)
-        except Exception as e:
-            print(f"Aviso: Não foi possível gerar preview (não crítico): {e}")
-        
+        helpers.generate_library_preview(obj, new_frame_number)
         return {'FINISHED'}
 
     def clear_frame_strokes(self, frame):
@@ -197,134 +70,12 @@ class TIME_OFFSET_OT_create_clean_frame(Operator):
                 strokes.remove(stroke)
         elif hasattr(frame, 'strokes'):
             frame.strokes.clear()
-    
-    def copy_as_reference(self, obj, src_frame, dst_frame, opacity):
-        """Copia strokes do src_frame para dst_frame com baixa opacidade"""
-        # Para cada layer, copiar o frame correspondente
-        for layer in obj.data.layers:
-            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
-                continue
-            
-            # Encontrar frame de origem nesta layer
-            src_layer_frame = None
-            for frame in layer.frames:
-                if frame.frame_number == src_frame:
-                    src_layer_frame = frame
-                    break
-            
-            if not src_layer_frame or not gp_api.is_frame_valid(src_layer_frame):
-                continue
-            
-            # Encontrar frame de destino nesta layer
-            dst_layer_frame = None
-            for frame in layer.frames:
-                if frame.frame_number == dst_frame:
-                    dst_layer_frame = frame
-                    break
-            
-            if not dst_layer_frame:
-                continue
-            
-            # Copiar strokes com opacidade ajustada
-            self.copy_strokes_with_opacity(src_layer_frame, dst_layer_frame, opacity)
-    
-    def copy_strokes_with_opacity(self, src_frame, dst_frame, opacity):
-        """Copia strokes de um frame para outro ajustando opacidade"""
-        if gp_api.is_gpv3():
-            # Implementação GPv3
-            if not hasattr(src_frame, 'drawing') or not src_frame.drawing:
-                return
-            
-            src_drawing = src_frame.drawing
-            dst_drawing = dst_frame.drawing
-            
-            # Limpar strokes existentes no destino
-            dst_drawing.strokes.clear()
-            
-            # Copiar strokes um a um
-            for src_stroke in src_drawing.strokes:
-                # Criar novo stroke com mesmo número de pontos
-                num_points = len(src_stroke.points)
-                dst_drawing.add_strokes([num_points])
-                dst_stroke = dst_drawing.strokes[-1]
-                
-                # Copiar atributos do stroke
-                dst_stroke.cyclic = src_stroke.cyclic
-                dst_stroke.softness = src_stroke.softness
-                dst_stroke.start_cap = src_stroke.start_cap
-                dst_stroke.end_cap = src_stroke.end_cap
-                dst_stroke.material_index = src_stroke.material_index
-                
-                # Copiar pontos
-                src_points = src_stroke.points
-                dst_points = dst_stroke.points
-                
-                for i, src_point in enumerate(src_points):
-                    dst_point = dst_points[i]
-                    dst_point.position = src_point.position.copy()
-                    dst_point.radius = src_point.radius
-                    dst_point.opacity = src_point.opacity * opacity  # Ajusta opacidade!
-                    dst_point.rotation = src_point.rotation
-                    
-                    # Copiar vertex color se existir
-                    if hasattr(src_point, 'vertex_color'):
-                        dst_point.vertex_color = src_point.vertex_color.copy()
-        else:
-            # Implementação GPv2
-            if not hasattr(src_frame, 'strokes'):
-                return
-            
-            # Limpar strokes existentes no destino
-            dst_frame.strokes.clear()
-            
-            # Para cada stroke na origem
-            for src_stroke in src_frame.strokes:
-                # Criar novo stroke
-                new_stroke = dst_frame.strokes.new()
-                new_stroke.points.add(len(src_stroke.points))
-                
-                # Copiar atributos do stroke
-                new_stroke.material_index = src_stroke.material_index
-                new_stroke.line_width = src_stroke.line_width
-                new_stroke.use_cyclic = src_stroke.use_cyclic
-                new_stroke.hardness = src_stroke.hardness
-                
-                # Copiar pontos com opacidade ajustada
-                for i, src_point in enumerate(src_stroke.points):
-                    dst_point = new_stroke.points[i]
-                    dst_point.co = src_point.co.copy()
-                    dst_point.pressure = src_point.pressure
-                    dst_point.strength = src_point.strength * opacity  # Ajusta opacidade!
-                    dst_point.vertex_color = src_point.vertex_color.copy()
-    
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=300)
-    
-    def draw(self, context):
-        layout = self.layout
-        layout.label(text="Opções do Novo Frame:", icon='ADD')
-        layout.separator()
-        
-        box = layout.box()
-        box.prop(self, "use_reference")
-        if self.use_reference:
-            box.prop(self, "reference_opacity", slider=True)
-            box.label(text="O frame atual será copiado como", icon='GHOST_ENABLED')
-            box.label(text="overlay transparente no novo frame")
 
 class TIME_OFFSET_OT_duplicate_current_frame(Operator):
-    """Duplica o frame ATUAL DA TIMELINE para a biblioteca e permite edição com contexto"""
+    """Duplica o frame da biblioteca que está definido no TimeOffset (valor negativo)"""
     bl_idname = "time_offset.duplicate_current_frame"
-    bl_label = "Duplicar Keyframe"
+    bl_label = "Duplicar Frame da Biblioteca"
     bl_options = {'REGISTER', 'UNDO'}
-
-    reference_opacity: bpy.props.FloatProperty(
-        name="Opacidade da referência",
-        default=0.3,
-        min=0.1,
-        max=0.8,
-        subtype='FACTOR'
-    ) #type: ignore
 
     @classmethod
     def poll(cls, context):
@@ -334,132 +85,402 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
     def execute(self, context):
         obj = context.active_object
         time_mod = helpers.get_time_offset_modifier(obj)
-        
         if not time_mod:
             self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
             return {'CANCELLED'}
-        
-        # ===========================================
-        # 1. SALVA ESTADOS ORIGINAIS
-        # ===========================================
-        timeline_frame = context.scene.frame_current  # Frame 10 (timeline)
-        original_library_frame = time_mod.offset  # Frame -10 (atual da biblioteca)
-        original_viewport = time_mod.show_viewport
-        original_editmode = time_mod.show_in_editmode
-        
-        # ===========================================
-        # 2. CRIA NOVO FRAME NA BIBLIOTECA
-        # ===========================================
-        new_library = self.create_library_frame(obj)
-        
-        if new_library is None:
-            self.report({'ERROR'}, "Não foi possível criar novo frame")
+
+        # Usar o valor do offset como frame da biblioteca
+        target_frame = time_mod.offset
+
+        # Garantir que estamos trabalhando com frames negativos
+        if target_frame >= 0:
+            self.report({'WARNING'}, "TimeOffset deve apontar para frames negativos (biblioteca)")
             return {'CANCELLED'}
-        
-        # ===========================================
-        # 3. COPIA O DESENHO DA TIMELINE PARA O NOVO FRAME
-        # ===========================================
-        self.copy_timeline_frame_to_library(obj, timeline_frame, new_library)
-        
-        # ===========================================
-        # 4. SALVA TODOS OS ESTADOS PARA RESTAURAR DEPOIS
-        # ===========================================
-        obj["timeoffset_saved_offset"] = original_library_frame
-        obj["timeoffset_saved_viewport"] = original_viewport
-        obj["timeoffset_saved_editmode"] = original_editmode
-        obj["timeoffset_saved_timeline"] = timeline_frame
-        obj["timeoffset_new_frame"] = new_library
-        
-        # ===========================================
-        # 5. CONFIGURA PARA EDIÇÃO
-        # ===========================================
-        # Aponta modifier para o novo frame
-        time_mod.offset = new_library
-        time_mod.show_viewport = True
-        time_mod.show_in_editmode = True
-        
-        # MUDA A TIMELINE para o novo frame (para desenhar nele)
-        context.scene.frame_current = new_library
-        
-        # CRIA OVERLAY do frame original da timeline
-        setup_timeline_overlay_global(context, timeline_frame, self.reference_opacity)
-        
-        # ===========================================
-        # 6. GUARDA METADADOS NA CENA
-        # ===========================================
-        context.scene["timeoffset_active_overlay"] = new_library
-        context.scene["timeoffset_overlay_opacity"] = self.reference_opacity
-        context.scene["timeoffset_timeline_frame"] = timeline_frame
-        
-        self.report({'INFO'}, 
-            f"✏️ Frame {timeline_frame} duplicado → {new_library}. Editando com overlay do {timeline_frame}")
-        
-        return {'FINISHED'}
-    
-    def create_library_frame(self, obj):
-        """Cria novo frame negativo na biblioteca - GARANTINDO QUE É ÚNICO"""
-        
-        # Encontra o frame MAIS NEGATIVO EXISTENTE
-        most_negative = 0
+
+        # ENCONTRAR O FRAME MAIS NEGATIVO
+        most_negative_frame = 0
         for layer in obj.data.layers:
             for frame in layer.frames:
-                if frame.frame_number < most_negative:
-                    most_negative = frame.frame_number
-        
-        # Vai descendo até encontrar um número livre
-        new_frame = most_negative
-        frame_exists = True
-        
-        while frame_exists:
-            new_frame -= 1
-            frame_exists = False
-            
-            # Verifica se esse número já existe em ALGUMA layer
-            for layer in obj.data.layers:
-                for frame in layer.frames:
-                    if frame.frame_number == new_frame:
-                        frame_exists = True
-                        break
-                if frame_exists:
-                    break
-        
-        print(f"📌 Novo frame único encontrado: {new_frame}")
-        
-        pose_id = uuid.uuid4().hex
-        
-        # Cria frame em todas layers não bloqueadas
-        layers_processed = 0
-        for layer in obj.data.layers:
-            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
-                continue
-            
-            try:
-                new_frame_obj = gp_api.new_active_frame(layer.frames, new_frame)
-                if new_frame_obj:
-                    self.clear_frame_strokes(new_frame_obj)
-                    layers_processed += 1
-            except Exception as e:
-                print(f"⚠️ Erro na layer {layer.info}: {e}")
-        
-        if layers_processed == 0:
-            print("❌ Nenhuma layer processada!")
-            return None
-        
-        helpers.set_pose_id(obj, new_frame, pose_id)
-        print(f"✅ Frame {new_frame} criado com pose_id {pose_id}")
-        
-        return new_frame
+                if frame.frame_number < most_negative_frame:
+                    most_negative_frame = frame.frame_number
 
-    def copy_timeline_frame_to_library(self, obj, timeline_frame, library_frame):
-        """Copia o desenho do frame da timeline para um frame da biblioteca"""
+        # O novo frame será AINDA MAIS NEGATIVO
+        new_frame_number = most_negative_frame - 1
+        new_pose_id = uuid.uuid4().hex
+        layers_processed = 0
+        layers_skipped = 0
+        frames_duplicated = 0
+
+        print(f"=== DEBUG: Duplicando frame {target_frame} para {new_frame_number} ===")
+
+        # PARA CADA LAYER, USAR A FUNÇÃO copy_frame DO API_ROUTER
+        for layer in obj.data.layers:
+            # Verificar se a layer está habilitada para edição
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                layers_skipped += 1
+                print(f" Layer {layer.info}: SKIPPED (locked or hidden)")
+                continue
+
+            # Buscar o frame TARGET na biblioteca
+            src_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == target_frame:
+                    src_frame = frame
+                    break
+
+            if src_frame:
+                try:
+                    print(f" Layer {layer.info}: Encontrado frame {target_frame}")
+                    # VERIFICAR SE O FRAME TEM CONTEÚDO
+                    has_content = False
+                    stroke_count = 0
+                    if hasattr(src_frame, 'strokes'):
+                        stroke_count = len(src_frame.strokes)
+                        has_content = stroke_count > 0
+                        print(f" Strokes no original: {stroke_count}")
+                    elif hasattr(src_frame, 'nuclear_strokes'):
+                        stroke_count = len(list(src_frame.nuclear_strokes))
+                        has_content = stroke_count > 0
+                        print(f" Nuclear strokes no original: {stroke_count}")
+
+                    if not has_content:
+                        print(f" AVISO: Frame original vazio na layer {layer.info}")
+                        # Criar frame vazio
+                        new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                        helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                        layers_processed += 1
+                        continue
+
+                    # USAR A FUNÇÃO copy_frame DO API_ROUTER
+                    print(f" Chamando gp_api.copy_frame...")
+                    new_frame = gp_api.copy_frame(layer.frames, src_frame, target_frame, new_frame_number)
+                    helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+
+
+                    # VERIFICAR SE O NOVO FRAME TEM CONTEÚDO
+                    new_has_content = False
+                    if hasattr(new_frame, 'strokes'):
+                        new_stroke_count = len(new_frame.strokes)
+                        new_has_content = new_stroke_count > 0
+                        print(f" Strokes no novo: {new_stroke_count}")
+                    elif hasattr(new_frame, 'nuclear_strokes'):
+                        new_stroke_count = len(list(new_frame.nuclear_strokes))
+                        new_has_content = new_stroke_count > 0
+                        print(f" Nuclear strokes no novo: {new_stroke_count}")
+
+                    if new_has_content:
+                        frames_duplicated += 1
+                        layers_processed += 1
+                        print(f" ✓ Frame duplicado com sucesso!")
+                    else:
+                        print(f" ✗ ERRO: Frame duplicado mas sem conteúdo!")
+                        # Tentar abordagem alternativa para GPv3
+                        if hasattr(src_frame, 'nuclear_strokes'):
+                            print(f" Tentando abordagem alternativa para GPv3...")
+                            self.duplicate_gpv3_frame_manually(layer, src_frame, new_frame_number)
+                except Exception as e:
+                    print(f" ERRO na layer {layer.info}: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    # Fallback: criar frame vazio
+                    try:
+                        new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                        layers_processed += 1
+                    except:
+                        pass
+            else:
+                # Se não existe frame TARGET nesta layer, criar um vazio
+                print(f" Layer {layer.info}: Frame {target_frame} não encontrado, criando vazio")
+                try:
+                    new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                    layers_processed += 1
+                except Exception as e:
+                    print(f" ERRO ao criar frame vazio: {str(e)}")
+
+        print(f"=== FIM DEBUG: {frames_duplicated} frames duplicados ===")
+
+        # Report
+        if frames_duplicated > 0:
+            self.report({'INFO'}, f"Frame {target_frame} → {new_frame_number} ({frames_duplicated} layers com conteúdo)")
+        else:
+            self.report({'WARNING'}, f"Frame duplicado, mas nenhum conteúdo copiado. Verifique o console.")
+
+        helpers.generate_library_preview(obj, new_frame_number)
+        helpers.get_library_preview(obj, new_frame_number)
+        return {'FINISHED'}
+
+class TIME_OFFSET_OT_duplicate_current_positive(Operator):
+    """Duplica o frame atual da timeline, criando uma cópia para edição no mesmo frame"""
+    bl_idname = "time_offset.duplicate_current_positive"
+    bl_label = "Duplicar Frame Atual"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and gp_api.obj_is_gp(obj)
+
+    def execute(self, context):
+        obj = context.active_object
+        current_frame = context.scene.frame_current
         
-        print(f"📋 Copiando timeline {timeline_frame} → biblioteca {library_frame}")
+        print(f"\n=== Duplicando frame {current_frame} para edição local ===")
+        
+        layers_processed = 0
+        frames_duplicated = 0
+        
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                print(f"  Layer {layer.info}: SKIPPED (locked/hidden)")
+                continue
+            
+            # Encontrar o frame atual
+            src_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == current_frame:
+                    src_frame = frame
+                    break
+            
+            if src_frame and gp_api.is_frame_valid(src_frame):
+                # Verificar se tem conteúdo
+                if hasattr(src_frame, 'strokes'):  # GPv2
+                    stroke_count = len(src_frame.strokes)
+                    print(f"  Layer {layer.info}: GPv2 com {stroke_count} strokes")
+                    
+                    if stroke_count > 0:
+                        # IMPORTANTE: NÃO limpar o frame! Queremos DUPLICAR, não substituir
+                        # Vamos copiar os strokes existentes para o MESMO frame
+                        
+                        # Criar uma lista dos strokes existentes para não modificar durante iteração
+                        existing_strokes = list(src_frame.strokes)
+                        
+                        for src_stroke in existing_strokes:
+                            # Copiar cada stroke
+                            new_stroke = src_frame.strokes.copy(src_stroke)
+                            print(f"    Stroke copiado")
+                        
+                        frames_duplicated += 1
+                        print(f"  Layer {layer.info}: {stroke_count} strokes duplicados (agora {len(src_frame.strokes)} total)")
+                    
+                elif hasattr(src_frame, 'nuclear_strokes'):  # GPv3
+                    stroke_count = len(list(src_frame.nuclear_strokes))
+                    print(f"  Layer {layer.info}: GPv3 com {stroke_count} strokes")
+                    
+                    if stroke_count > 0 and hasattr(src_frame, 'drawing'):
+                        drawing = src_frame.drawing
+                        existing_strokes = list(drawing.strokes)
+                        
+                        for src_stroke in existing_strokes:
+                            # Criar novo stroke
+                            new_stroke = drawing.strokes.new()
+                            # Copiar pontos
+                            for src_point in src_stroke.points:
+                                new_point = new_stroke.points.new()
+                                new_point.position = src_point.position.copy()
+                            print(f"    Stroke copiado")
+                        
+                        frames_duplicated += 1
+                        print(f"  Layer {layer.info}: {stroke_count} strokes duplicados")
+            else:
+                print(f"  Layer {layer.info}: Frame {current_frame} não encontrado")
+            
+            layers_processed += 1
+        
+        print(f"=== Duplicação concluída: {frames_duplicated} layers processadas ===\n")
+        
+        self.report({'INFO'}, 
+                   f"Frame {current_frame} duplicado para edição local ({frames_duplicated} layers)")
+        
+        # Forçar atualização da viewport
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+class TIME_OFFSET_OT_bring_to_timeline(Operator):
+    """Traz o frame atual da biblioteca para a timeline para edição local"""
+    bl_idname = "time_offset.bring_to_timeline"
+    bl_label = "Trazer Frame para Timeline"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj) if obj else None
+        return obj and gp_api.obj_is_gp(obj) and time_mod and time_mod.offset < 0
+
+    def execute(self, context):
+        obj = context.active_object
+        time_mod = helpers.get_time_offset_modifier(obj)
+        
+        library_frame = time_mod.offset
+        timeline_frame = context.scene.frame_current
+        
+        print(f"\n=== Trazendo biblioteca {library_frame} → timeline {timeline_frame} ===")
+        
+        layers_processed = 0
+        frames_copied = 0
         
         for layer in obj.data.layers:
             if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
                 continue
             
-            # Encontra o frame na TIMELINE (frame positivo)
+            # Encontrar frame origem na biblioteca
+            src_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == library_frame:
+                    src_frame = frame
+                    break
+            
+            if not src_frame:
+                print(f"  Layer {layer.info}: Frame {library_frame} não encontrado")
+                continue
+            
+            # Verificar se tem strokes via nuclear_strokes
+            if not hasattr(src_frame, 'nuclear_strokes'):
+                print(f"  Layer {layer.info}: Frame sem nuclear_strokes")
+                continue
+            
+            # Contar strokes
+            stroke_count = 0
+            src_strokes = []
+            for stroke in src_frame.nuclear_strokes:
+                src_strokes.append(stroke)
+                stroke_count += 1
+            
+            print(f"  Layer {layer.info}: {stroke_count} strokes encontrados")
+            
+            if stroke_count == 0:
+                continue
+            
+            # Verificar frame destino na timeline
+            dst_frame = None
+            for frame in layer.frames:
+                if frame.frame_number == timeline_frame:
+                    dst_frame = frame
+                    break
+            
+            if dst_frame:
+                # Limpar frame existente
+                if hasattr(dst_frame, 'nuclear_strokes'):
+                    strokes_to_remove = []
+                    for stroke in dst_frame.nuclear_strokes:
+                        strokes_to_remove.append(stroke)
+                    
+                    for stroke in strokes_to_remove:
+                        dst_frame.nuclear_strokes.remove(stroke)
+                    
+                    print(f"    Frame {timeline_frame} existente limpo")
+            else:
+                # Criar novo frame
+                dst_frame = gp_api.new_active_frame(layer.frames, timeline_frame)
+                print(f"    Novo frame {timeline_frame} criado")
+            
+            # Copiar strokes
+            if dst_frame and hasattr(dst_frame, 'nuclear_strokes'):
+                for src_stroke in src_strokes:
+                    # Criar novo stroke
+                    new_stroke = dst_frame.nuclear_strokes.new()
+                    
+                    # Copiar pontos - usando add() em vez de new()
+                    if hasattr(src_stroke, 'points'):
+                        # Contar pontos para adicionar
+                        point_count = 0
+                        src_points = []
+                        for src_point in src_stroke.points:
+                            src_points.append(src_point)
+                            point_count += 1
+                        
+                        if point_count > 0:
+                            # Adicionar pontos de uma vez
+                            new_stroke.points.add(point_count)
+                            
+                            # Copiar dados dos pontos
+                            for i, src_point in enumerate(src_points):
+                                if hasattr(src_point, 'co'):
+                                    new_stroke.points[i].co = src_point.co.copy()
+                                if hasattr(src_point, 'pressure'):
+                                    new_stroke.points[i].pressure = src_point.pressure
+                                if hasattr(src_point, 'strength'):
+                                    new_stroke.points[i].strength = src_point.strength
+                
+                frames_copied += 1
+                print(f"    {stroke_count} strokes copiados")
+            
+            layers_processed += 1
+        
+        # Desligar modificador
+        if time_mod:
+            time_mod.show_viewport = False
+            print(f"  Modificador desligado para edição local")
+        
+        print(f"=== Concluído: {frames_copied} layers processadas ===\n")
+        
+        self.report({'INFO'}, 
+                   f"Frame {library_frame} da biblioteca copiado para timeline {timeline_frame}")
+        
+        # Forçar atualização
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+class TIME_OFFSET_OT_send_to_library(Operator):
+    """Envia o frame atual da timeline para a biblioteca como um novo frame"""
+    bl_idname = "time_offset.send_to_library"
+    bl_label = "Enviar para Biblioteca"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        obj = context.active_object
+        return obj and gp_api.obj_is_gp(obj)
+
+    def execute(self, context):
+        obj = context.active_object
+        timeline_frame = context.scene.frame_current
+        
+        # Encontrar o frame MAIS NEGATIVO (menor número) para criar o NOVO
+        # Inicializar com 0 (nenhum frame negativo)
+        most_negative = 0
+        
+        # Primeiro, listar todos os frames negativos existentes
+        negative_frames = []
+        for layer in obj.data.layers:
+            for frame in layer.frames:
+                if frame.frame_number < 0:
+                    negative_frames.append(frame.frame_number)
+                    # Atualizar o mais negativo
+                    if frame.frame_number < most_negative:
+                        most_negative = frame.frame_number
+        
+        print(f"  Frames negativos existentes: {sorted(set(negative_frames))}")
+        print(f"  Frame mais negativo atual: {most_negative}")
+        
+        # O novo frame será 1 a mais negativo que o mais negativo atual
+        # Se most_negative for 0 (não há frames negativos), começa com -1
+        if most_negative == 0:
+            new_library_frame = -1
+        else:
+            new_library_frame = most_negative - 1
+            
+        new_pose_id = uuid.uuid4().hex
+        
+        print(f"  Novo frame da biblioteca: {new_library_frame}")
+        print(f"  Novo pose_id: {new_pose_id}")
+        print(f"\n=== Enviando timeline {timeline_frame} → biblioteca {new_library_frame} ===")
+        
+        layers_processed = 0
+        frames_sent = 0
+        
+        for layer in obj.data.layers:
+            if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
+                print(f"  Layer {layer.info}: ignorada (locked/hidden)")
+                continue
+            
+            # Encontrar frame origem na timeline
             src_frame = None
             for frame in layer.frames:
                 if frame.frame_number == timeline_frame:
@@ -467,246 +488,254 @@ class TIME_OFFSET_OT_duplicate_current_frame(Operator):
                     break
             
             if not src_frame:
-                print(f"⚠️ Frame {timeline_frame} não encontrado na layer {layer.info}")
+                print(f"  Layer {layer.info}: Frame {timeline_frame} não encontrado")
                 continue
             
-            # Encontra o frame na BIBLIOTECA (frame negativo)
-            dst_frame = None
+            # Verificar strokes via nuclear_strokes
+            if not hasattr(src_frame, 'nuclear_strokes'):
+                print(f"  Layer {layer.info}: sem nuclear_strokes")
+                continue
+            
+            # Contar strokes
+            stroke_count = 0
+            src_strokes = []
+            for stroke in src_frame.nuclear_strokes:
+                src_strokes.append(stroke)
+                stroke_count += 1
+            
+            print(f"  Layer {layer.info}: {stroke_count} strokes encontrados")
+            
+            if stroke_count == 0:
+                continue
+            
+            # VERIFICAR SE O FRAME DESTINO JÁ EXISTE
+            frame_exists = False
             for frame in layer.frames:
-                if frame.frame_number == library_frame:
-                    dst_frame = frame
+                if frame.frame_number == new_library_frame:
+                    frame_exists = True
+                    print(f"    AVISO: Frame {new_library_frame} já existe nesta layer!")
                     break
             
-            if not dst_frame:
-                print(f"⚠️ Frame {library_frame} não encontrado na layer {layer.info}")
+            if frame_exists:
+                print(f"    Pulando layer {layer.info} - frame já existe")
                 continue
             
-            # Limpa o destino
-            if gp_api.is_frame_valid(dst_frame):
-                self.clear_frame_strokes(dst_frame)
+            # Criar novo frame na biblioteca
+            print(f"    Criando novo frame {new_library_frame}...")
+            new_frame = gp_api.new_active_frame(layer.frames, new_library_frame)
             
-            # Copia TUDO do src_frame para dst_frame
-            self.copy_strokes_complete(src_frame, dst_frame)
+            # Copiar strokes
+            if new_frame and hasattr(new_frame, 'nuclear_strokes'):
+                for src_stroke in src_strokes:
+                    new_stroke = new_frame.nuclear_strokes.new()
+                    
+                    if hasattr(src_stroke, 'points'):
+                        # Contar pontos
+                        point_count = 0
+                        src_points = []
+                        for src_point in src_stroke.points:
+                            src_points.append(src_point)
+                            point_count += 1
+                        
+                        if point_count > 0:
+                            # Adicionar pontos de uma vez
+                            new_stroke.points.add(point_count)
+                            
+                            # Copiar dados
+                            for i, src_point in enumerate(src_points):
+                                if hasattr(src_point, 'co'):
+                                    new_stroke.points[i].co = src_point.co.copy()
+                                if hasattr(src_point, 'pressure'):
+                                    new_stroke.points[i].pressure = src_point.pressure
+                                if hasattr(src_point, 'strength'):
+                                    new_stroke.points[i].strength = src_point.strength
+                
+                helpers.set_pose_id(obj, new_library_frame, new_pose_id)
+                frames_sent += 1
+                print(f"    {stroke_count} strokes enviados para biblioteca")
             
-            print(f"✅ Copiado layer {layer.info}")
+            layers_processed += 1
+        
+        # Gerar preview apenas se enviou algo
+        if frames_sent > 0:
+            print(f"\n  Gerando preview para frame {new_library_frame}...")
+            helpers.generate_library_preview(obj, new_library_frame)
+        
+        print(f"\n=== RESUMO ===")
+        print(f"  Layers processadas: {layers_processed}")
+        print(f"  Frames enviados: {frames_sent}")
+        print(f"  Novo frame da biblioteca: {new_library_frame}")
+        
+        # Listar frames negativos atualizados
+        updated_negatives = []
+        for layer in obj.data.layers:
+            for frame in layer.frames:
+                if frame.frame_number < 0:
+                    updated_negatives.append(frame.frame_number)
+        print(f"  Frames negativos agora: {sorted(set(updated_negatives))}")
+        print("=== CONCLUÍDO ===\n")
+        
+        self.report({'INFO'}, 
+                   f"Timeline {timeline_frame} enviado para biblioteca {new_library_frame}")
+        
+        # Forçar atualização
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
 
-    def copy_strokes_complete(self, src_frame, dst_frame):
-        """Copia TODOS os strokes com TODAS as propriedades"""
-        
-        if gp_api.is_gpv3():
-            # ========== GPv3 ==========
-            if not hasattr(src_frame, 'drawing') or not src_frame.drawing:
-                return
-            
-            src_drawing = src_frame.drawing
-            dst_drawing = dst_frame.drawing
-            
-            # ⚠️ CORREÇÃO: No GPv3, não podemos simplesmente .clear()
-            # Precisamos remover os strokes um a um
-            strokes_to_remove = list(dst_drawing.strokes)
-            for stroke in strokes_to_remove:
-                dst_drawing.strokes.remove(stroke)
-            
-            # Copia cada stroke individualmente
-            for src_stroke in src_drawing.strokes:
-                num_points = len(src_stroke.points)
-                
-                # ⚠️ CORREÇÃO: add_strokes espera uma lista de números de pontos
-                dst_drawing.add_strokes([num_points])
-                dst_stroke = dst_drawing.strokes[-1]
-                
-                # ===== PROPRIEDADES DO STROKE =====
-                # Básicas
-                dst_stroke.cyclic = src_stroke.cyclic
-                dst_stroke.softness = src_stroke.softness
-                dst_stroke.start_cap = src_stroke.start_cap
-                dst_stroke.end_cap = src_stroke.end_cap
-                dst_stroke.material_index = src_stroke.material_index
-                
-                # Fill (preenchimento)
-                if hasattr(src_stroke, 'fill_color'):
-                    dst_stroke.fill_color = src_stroke.fill_color.copy()
-                
-                # Propriedades UV (importantes para texturas)
-                if hasattr(src_stroke, 'uv_rotation'):
-                    dst_stroke.uv_rotation = src_stroke.uv_rotation
-                if hasattr(src_stroke, 'uv_translation'):
-                    dst_stroke.uv_translation = src_stroke.uv_translation.copy()
-                if hasattr(src_stroke, 'uv_scale'):
-                    dst_stroke.uv_scale = src_stroke.uv_scale.copy()
-                
-                # Seleção (opcional)
-                if hasattr(src_stroke, 'select'):
-                    dst_stroke.select = src_stroke.select
-                
-                # ===== PONTOS =====
-                src_points = src_stroke.points
-                dst_points = dst_stroke.points
-                
-                for i, src_point in enumerate(src_points):
-                    dst_point = dst_points[i]
-                    
-                    # Posição
-                    dst_point.position = src_point.position.copy()
-                    
-                    # Espessura/radius
-                    dst_point.radius = src_point.radius
-                    
-                    # Opacidade
-                    dst_point.opacity = src_point.opacity
-                    
-                    # Rotação UV
-                    dst_point.rotation = src_point.rotation
-                    
-                    # Cor do vértice
-                    if hasattr(src_point, 'vertex_color'):
-                        dst_point.vertex_color = src_point.vertex_color.copy()
-        
-        else:
-            # ========== GPv2 ==========
-            if not hasattr(src_frame, 'strokes'):
-                return
-            
-            # Limpa strokes existentes (GPv2 permite .clear())
-            dst_frame.strokes.clear()
-            
-            # Copia cada stroke
-            for src_stroke in src_frame.strokes:
-                new_stroke = dst_frame.strokes.new()
-                new_stroke.points.add(len(src_stroke.points))
-                
-                # ===== PROPRIEDADES DO STROKE =====
-                # Básicas
-                new_stroke.material_index = src_stroke.material_index
-                new_stroke.line_width = src_stroke.line_width
-                new_stroke.use_cyclic = src_stroke.use_cyclic
-                new_stroke.hardness = src_stroke.hardness
-                
-                # Fill (preenchimento)
-                if hasattr(src_stroke, 'fill_opacity'):
-                    new_stroke.fill_opacity = src_stroke.fill_opacity
-                if hasattr(src_stroke, 'fill_color'):
-                    new_stroke.fill_color = src_stroke.fill_color.copy()
-                
-                # Caps
-                if hasattr(src_stroke, 'start_cap_mode'):
-                    new_stroke.start_cap_mode = src_stroke.start_cap_mode
-                if hasattr(src_stroke, 'end_cap_mode'):
-                    new_stroke.end_cap_mode = src_stroke.end_cap_mode
-                
-                # ===== PONTOS =====
-                for i, src_point in enumerate(src_stroke.points):
-                    dst_point = new_stroke.points[i]
-                    
-                    # Posição
-                    dst_point.co = src_point.co.copy()
-                    
-                    # Pressão
-                    dst_point.pressure = src_point.pressure
-                    
-                    # Força/opacidade
-                    dst_point.strength = src_point.strength
-                    
-                    # Cor do vértice
-                    dst_point.vertex_color = src_point.vertex_color.copy()
-        
-        print(f"✅ Strokes copiados com todas as propriedades")
+class TIME_OFFSET_OT_capture_edited_to_library(Operator):
+    """Envia a versão editada do frame atual para a biblioteca"""
+    bl_idname = "time_offset.capture_edited_to_library"
+    bl_label = "Enviar Edição para Biblioteca"
+    bl_options = {'REGISTER', 'UNDO'}
 
-    def clear_frame_strokes(self, frame):
-        """Limpa strokes de um frame"""
-        if hasattr(frame, 'nuclear_strokes'):
-            strokes = list(frame.nuclear_strokes)
-            for stroke in strokes:
-                frame.nuclear_strokes.remove(stroke)
-        elif hasattr(frame, 'strokes'):
-            frame.strokes.clear()
-    
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=300)
-    
-    def draw(self, context):
-        layout = self.layout
-        layout.label(text="Duplicar Keyframe com Contexto:", icon='DUPLICATE')
-        layout.separator()
-        
-        box = layout.box()
-        box.prop(self, "reference_opacity", slider=True)
-        box.label(text="O frame original ficará como", icon='GHOST_ENABLED')
-        box.label(text="overlay azul para referência")
-
-class TIME_OFFSET_OT_return_to_reference(Operator):
-    """Volta para o frame da timeline que serviu como referência"""
-    bl_idname = "time_offset.return_to_reference"
-    bl_label = "Voltar à Referência"
-    bl_options = {'REGISTER'}
-    
-    restore_opacity: bpy.props.BoolProperty(
-        name="Restaurar opacidade original",
-        description="Volta a opacidade do frame de referência ao normal",
-        default=True
-    ) #type: ignore
-    
     @classmethod
     def poll(cls, context):
-        return "timeoffset_return_frame" in context.scene
-    
-    def execute(self, context):
-        return_frame = context.scene["timeoffset_return_frame"]
         obj = context.active_object
+        return obj and gp_api.obj_is_gp(obj)
+
+    def execute(self, context):
+        obj = context.active_object
+        current_frame = context.scene.frame_current
         
-        # Se tivermos um frame de referência com opacidade ajustada
-        if self.restore_opacity and "timeoffset_reference_frame" in context.scene:
-            ref_frame = context.scene["timeoffset_reference_frame"]
-            self.restore_original_opacity(obj, ref_frame)
-            del context.scene["timeoffset_reference_frame"]
+        # Encontrar o frame mais negativo para criar o novo
+        most_negative = 0
+        for layer in obj.data.layers:
+            for frame in layer.frames:
+                if frame.frame_number < most_negative:
+                    most_negative = frame.frame_number
         
-        # Volta para o frame original
-        context.scene.frame_current = return_frame
+        new_frame_number = most_negative - 1
+        new_pose_id = uuid.uuid4().hex
         
-        # Limpa a propriedade
-        del context.scene["timeoffset_return_frame"]
+        layers_processed = 0
+        frames_captured = 0
+        frames_with_content = 0
         
-        self.report({'INFO'}, f"Voltou ao frame {return_frame}")
-        return {'FINISHED'}
-    
-    def restore_original_opacity(self, obj, frame_number):
-        """Restaura opacidade original (1.0) dos strokes"""
+        print(f"=== Enviando edição do frame {current_frame} para biblioteca {new_frame_number} ===")
+        
         for layer in obj.data.layers:
             if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
                 continue
             
-            # Encontrar o frame
-            target_frame = None
+            # Encontrar o frame atual (editado)
+            src_frame = None
             for frame in layer.frames:
-                if frame.frame_number == frame_number:
-                    target_frame = frame
+                if frame.frame_number == current_frame:
+                    src_frame = frame
                     break
             
-            if not target_frame or not gp_api.is_frame_valid(target_frame):
-                continue
-            
-            if gp_api.is_gpv3():
-                # GPv3
-                if hasattr(target_frame, 'drawing') and target_frame.drawing:
-                    drawing = target_frame.drawing
-                    for stroke in drawing.strokes:
-                        for point in stroke.points:
-                            point.opacity = 1.0
+            if src_frame:
+                # Verificar se tem conteúdo
+                has_content = False
+                stroke_count = 0
+                
+                if hasattr(src_frame, 'strokes'):  # GPv2
+                    stroke_count = len(src_frame.strokes)
+                    has_content = stroke_count > 0
+                    print(f"  Layer {layer.info}: GPv2 com {stroke_count} strokes")
+                elif hasattr(src_frame, 'nuclear_strokes'):  # GPv3
+                    stroke_count = len(list(src_frame.nuclear_strokes))
+                    has_content = stroke_count > 0
+                    print(f"  Layer {layer.info}: GPv3 com {stroke_count} strokes")
+                
+                if has_content:
+                    frames_with_content += 1
+                    
+                    # PARA GPv2 - método direto
+                    if hasattr(src_frame, 'strokes'):
+                        try:
+                            # Criar novo frame
+                            new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                            
+                            # Copiar strokes manualmente
+                            for src_stroke in src_frame.strokes:
+                                new_stroke = new_frame.strokes.copy(src_stroke)
+                            
+                            helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                            frames_captured += 1
+                            print(f"  Layer {layer.info}: {stroke_count} strokes copiados manualmente")
+                            
+                        except Exception as e:
+                            print(f"  Layer {layer.info}: Erro na cópia manual - {str(e)}")
+                    
+                    # PARA GPv3 - via nuclear_strokes
+                    elif hasattr(src_frame, 'nuclear_strokes'):
+                        try:
+                            new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                            
+                            # Acessar o drawing
+                            if hasattr(src_frame, 'drawing') and src_frame.drawing:
+                                src_drawing = src_frame.drawing
+                                dst_drawing = new_frame.drawing
+                                
+                                # Copiar strokes
+                                for src_stroke in src_drawing.strokes:
+                                    new_stroke = dst_drawing.strokes.new()
+                                    # Copiar pontos
+                                    for src_point in src_stroke.points:
+                                        new_point = new_stroke.points.new()
+                                        new_point.position = src_point.position.copy()
+                            
+                            helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                            frames_captured += 1
+                            print(f"  Layer {layer.info}: GPv3 copiado via drawing")
+                            
+                        except Exception as e:
+                            print(f"  Layer {layer.info}: Erro GPv3 - {str(e)}")
+                else:
+                    # Frame sem conteúdo, criar vazio
+                    new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                    helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                    print(f"  Layer {layer.info}: Frame vazio criado")
             else:
-                # GPv2
-                if hasattr(target_frame, 'strokes'):
-                    for stroke in target_frame.strokes:
-                        for point in stroke.points:
-                            point.strength = 1.0
-    
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=250)
-    
-    def draw(self, context):
-        layout = self.layout
-        layout.label(text="Voltar à Referência", icon='LOOP_BACK')
-        layout.separator()
-        layout.prop(self, "restore_opacity")
+                # Não tem frame na layer, criar vazio
+                new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+                helpers.set_pose_id(obj, new_frame_number, new_pose_id)
+                print(f"  Layer {layer.info}: Frame vazio criado (sem frame origem)")
+            
+            layers_processed += 1
+        
+        # Gerar preview
+        print(f"=== Gerando preview para frame {new_frame_number} ===")
+        helpers.generate_library_preview(obj, new_frame_number)
+        
+        # Verificar se o preview foi criado
+        preview_key = helpers.get_library_preview(obj, new_frame_number)
+        if preview_key:
+            print(f"✓ Preview gerado com sucesso")
+        else:
+            print(f"✗ Preview não foi gerado")
+        
+        self.report({'INFO'}, 
+                   f"Edição do frame {current_frame} enviada para biblioteca {new_frame_number} "
+                   f"({frames_captured} layers com conteúdo de {frames_with_content} layers com conteúdo original)")
+        
+        # Forçar atualização da UI
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+#region Old
+
+    # EU, digo EU. Tiraria isso aqui vai na fé
+    # def duplicate_gpv3_frame_manually(self, layer, src_frame, new_frame_number, obj, new_pose_id):
+    #     """Tentativa manual para GPv3 quando copy_frame não funciona"""
+    #     try:
+    #         if hasattr(src_frame, 'drawing') and src_frame.drawing:
+    #             print(f" Tentando duplicação via drawing API...")
+    #             new_frame = gp_api.new_active_frame(layer.frames, new_frame_number)
+    #             helpers.set_pose_id(obj, new_frame_number, new_pose_id)  # obj vem do contexto, mas como é método, use self
+    #             print(f" Novo frame criado (sem cópia de drawing)")
+    #             return new_frame
+    #     except Exception as e:
+    #         print(f" ERRO na duplicação manual: {str(e)}")
+    #         return None
+#endregion
 
 class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
     """Flip horizontal do bone selecionado (Numpad 4) - o GP acompanha automaticamente"""
@@ -714,12 +743,6 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
     bl_label = "Flip Horizontal (Bone)"
     bl_description = "Flip horizontal do bone ativo (escala X ou Y = -1 dependendo da orientação). O Grease Pencil deformado acompanha"
     bl_options = {'REGISTER', 'UNDO'}
-
-    insert_offset_keyframe: bpy.props.BoolProperty(
-        name="Inserir Keyframe no Offset",
-        description="Insere keyframe no offset do TimeOffset junto com o flip",
-        default=False
-    ) #type: ignore
 
     @classmethod
     def poll(cls, context):
@@ -737,7 +760,7 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
         head_local = bone.bone.head_local
         tail_local = bone.bone.tail_local
         bone_vector = tail_local - head_local
-        bone_vector.normalize()
+        bone_vector.normalize()  # unitário para comparação melhor
 
         # Ângulos com eixos globais (dot product)
         from mathutils import Vector
@@ -745,23 +768,23 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
         dot_y = abs(bone_vector.dot(Vector((0, 1, 0))))
         dot_z = abs(bone_vector.dot(Vector((0, 0, 1))))
 
-        # Decidir eixo de flip
-        if max(dot_y, dot_z) > dot_x + 0.1:
-            flip_axis = 'Y'
+        # Decidir eixo de flip: o mais alinhado com Y/Z (vertical) → flip Y; senão flip X
+        if max(dot_y, dot_z) > dot_x + 0.1:  # tolerância pequena para evitar falsos positivos
+            flip_axis = 'Y'  # bone mais vertical → flip Y
         else:
-            flip_axis = 'X'
+            flip_axis = 'X'  # horizontal padrão → flip X
 
-        # Aplicar flip
+        # Aplicar flip no eixo escolhido
         if flip_axis == 'X':
             bone.scale.y *= -1.0
         else:
             bone.scale.x *= -1.0
 
-        # Keyframe
+        # Keyframe no eixo flipado
         current_frame = context.scene.frame_current
         bone.keyframe_insert(data_path="scale", frame=current_frame)
 
-        # Busca GP associado
+        # Busca GP associado e keyframe offset (como antes)
         gp_obj = None
         armature = context.object
         for obj in context.scene.objects:
@@ -772,24 +795,87 @@ class TIME_OFFSET_OT_flip_horizontal(bpy.types.Operator):
 
         if gp_obj:
             time_mod = helpers.get_time_offset_modifier(gp_obj)
-            if time_mod and self.insert_offset_keyframe:
+            if time_mod:
                 time_mod.keyframe_insert(data_path="offset", frame=current_frame)
-                self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis}) + keyframes")
-            elif gp_obj:
-                self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis})")
+                self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframes (scale + offset)")
+            else:
+                self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframe na escala (sem offset)")
         else:
-            self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis})")
+            self.report({'INFO'}, f"Bone '{bone.name}' flipado ({flip_axis} invertido) + keyframe na escala")
 
         return {'FINISHED'}
-    
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self, width=300)
-    
-    def draw(self, context):
-        layout = self.layout
-        layout.label(text="Opções do Flip:", icon='UV_SYNC_SELECT')
-        layout.separator()
-        layout.prop(self, "insert_offset_keyframe")
+
+"""Operador pq a May pediu"""
+class TIME_OFFSET_OT_flip_horizontal_object(Operator):
+    """Flip horizontal do objeto selecionado (Numpad 4) - aplica escala -1 no eixo adequado"""
+    bl_idname = "time_offset.flip_horizontal_object"
+    bl_label = "Flip Horizontal (Object)"
+    bl_description = "Flip horizontal do objeto ativo (escala X ou Y = -1 baseado na orientação)"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    @classmethod
+    def poll(cls, context):
+        return (context.mode == 'OBJECT' and
+                context.object is not None)
+
+    def execute(self, context):
+        obj = context.object
+        
+        if not obj:
+            self.report({'WARNING'}, "Selecione um objeto")
+            return {'CANCELLED'}
+        
+        # Pegar a matriz do objeto no espaço global
+        matrix = obj.matrix_world
+        
+        # Extrair vetores de direção dos eixos locais
+        x_axis = matrix.to_3x3() @ Vector((1, 0, 0))
+        y_axis = matrix.to_3x3() @ Vector((0, 1, 0))
+        z_axis = matrix.to_3x3() @ Vector((0, 0, 1))
+        
+        # Normalizar
+        x_axis.normalize()
+        y_axis.normalize()
+        z_axis.normalize()
+        
+        # Calcular quanto cada eixo local aponta para a direita (X global)
+        # Queremos o eixo que tem o MAIOR componente no X global
+        right_alignment = {
+            'X': abs(x_axis.x),  # Quanto do eixo X local aponta para X global
+            'Y': abs(y_axis.x),  # Quanto do eixo Y local aponta para X global
+            'Z': abs(z_axis.x)   # Quanto do eixo Z local aponta para X global
+        }
+        
+        # Escolher o eixo mais alinhado com a direita (X global)
+        flip_axis = max(right_alignment, key=right_alignment.get)
+        
+        print(f"  Alinhamentos: X={right_alignment['X']:.2f}, Y={right_alignment['Y']:.2f}, Z={right_alignment['Z']:.2f}")
+        print(f"  Eixo escolhido para flip: {flip_axis}")
+        
+        # Aplicar flip no eixo escolhido
+        if flip_axis == 'X':
+            obj.scale.x *= -1.0
+        elif flip_axis == 'Y':
+            obj.scale.y *= -1.0
+        else:  # 'Z'
+            obj.scale.z *= -1.0
+        
+        # Keyframe na escala
+        current_frame = context.scene.frame_current
+        obj.keyframe_insert(data_path="scale", frame=current_frame)
+        
+        # Se for um Grease Pencil, também keyframe no offset (se existir)
+        if gp_api.obj_is_gp(obj):
+            time_mod = helpers.get_time_offset_modifier(obj)
+            if time_mod:
+                time_mod.keyframe_insert(data_path="offset", frame=current_frame)
+                self.report({'INFO'}, f"Objeto '{obj.name}' flipado (eixo {flip_axis}) + keyframes (scale + offset)")
+            else:
+                self.report({'INFO'}, f"Objeto '{obj.name}' flipado (eixo {flip_axis}) + keyframe na escala")
+        else:
+            self.report({'INFO'}, f"Objeto '{obj.name}' flipado (eixo {flip_axis}) + keyframe na escala")
+        
+        return {'FINISHED'}
 
 class TIME_OFFSET_OT_toggle_edit_mode(Operator):
     """Ativa/desativa a visibilidade do modificador para permitir edição"""
@@ -809,6 +895,7 @@ class TIME_OFFSET_OT_toggle_edit_mode(Operator):
             self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
             return {'CANCELLED'}
 
+        # Inverter estado
         new_state = not time_mod.show_in_editmode
         time_mod.show_in_editmode = new_state
         time_mod.show_viewport = new_state
@@ -830,7 +917,9 @@ class TIME_OFFSET_OT_navigate_previous(Operator):
             self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
             return {'CANCELLED'}
 
+        # Diminuir o offset (tornar mais negativo)
         time_mod.offset -= 1
+        # Garantir que não fique positivo
         if time_mod.offset >= 0:
             time_mod.offset = -1
         return {'FINISHED'}
@@ -848,7 +937,9 @@ class TIME_OFFSET_OT_navigate_next(Operator):
             self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
             return {'CANCELLED'}
 
+        # Aumentar o offset (tornar menos negativo)
         time_mod.offset += 1
+        # Garantir que não fique positivo
         if time_mod.offset >= 0:
             time_mod.offset = -1
         return {'FINISHED'}
@@ -871,6 +962,7 @@ class TIME_OFFSET_OT_go_to_first_library_frame(Operator):
             self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
             return {'CANCELLED'}
 
+        # Encontrar o frame mais negativo na biblioteca
         first_negative_frame = 0
         has_negative_frames = False
         for layer in obj.data.layers:
@@ -881,10 +973,10 @@ class TIME_OFFSET_OT_go_to_first_library_frame(Operator):
 
         if has_negative_frames:
             time_mod.offset = first_negative_frame
-            self.report({'INFO'}, f"Frame {first_negative_frame}")
+            self.report({'INFO'}, f"Frame {first_negative_frame} (primeiro da biblioteca)")
         else:
             time_mod.offset = -1
-            self.report({'INFO'}, "Criado frame -1")
+            self.report({'INFO'}, "Criado frame -1 (biblioteca vazia)")
         return {'FINISHED'}
 
 class TIME_OFFSET_OT_animate_offset(Operator):
@@ -905,10 +997,14 @@ class TIME_OFFSET_OT_animate_offset(Operator):
             self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
             return {'CANCELLED'}
 
+        # Garantir que o objeto tenha dados de animação
         if not obj.animation_data:
             obj.animation_data_create()
 
+        # Verificar se a propriedade offset já está animada
         is_animated = helpers.is_offset_animated(obj, time_mod)
+
+        # Criar keyframe no frame atual
         time_mod.keyframe_insert(data_path="offset", frame=context.scene.frame_current)
 
         if not is_animated:
@@ -935,9 +1031,10 @@ class TIME_OFFSET_OT_remove_animation(Operator):
             self.report({'WARNING'}, "Modificador TimeOffset não encontrado")
             return {'CANCELLED'}
 
+        # Verificar se está animado
         if helpers.is_offset_animated(obj, time_mod):
             time_mod.keyframe_delete(data_path="offset")
-            self.report({'INFO'}, "Animação removida")
+            self.report({'INFO'}, "Animação removida do offset")
         else:
             self.report({'WARNING'}, "Offset não está animado")
         return {'FINISHED'}
@@ -983,6 +1080,7 @@ class TIME_OFFSET_OT_next_keyframe(Operator):
             self.report({'WARNING'}, "FCurve do offset não encontrada")
             return {'CANCELLED'}
 
+        # Encontrar próximo keyframe
         current_frame = context.scene.frame_current
         next_keyframe = None
         for keyframe in fcurve.keyframe_points:
@@ -994,7 +1092,7 @@ class TIME_OFFSET_OT_next_keyframe(Operator):
             context.scene.frame_current = int(next_keyframe.co.x)
             self.report({'INFO'}, f"Frame {int(next_keyframe.co.x)}")
         else:
-            self.report({'INFO'}, "Último keyframe")
+            self.report({'INFO'}, "Último keyframe alcançado")
         return {'FINISHED'}
 
 class TIME_OFFSET_OT_previous_keyframe(Operator):
@@ -1038,6 +1136,7 @@ class TIME_OFFSET_OT_previous_keyframe(Operator):
             self.report({'WARNING'}, "FCurve do offset não encontrada")
             return {'CANCELLED'}
 
+        # Encontrar keyframe anterior
         current_frame = context.scene.frame_current
         prev_keyframe = None
         for keyframe in fcurve.keyframe_points:
@@ -1049,134 +1148,7 @@ class TIME_OFFSET_OT_previous_keyframe(Operator):
             context.scene.frame_current = int(prev_keyframe.co.x)
             self.report({'INFO'}, f"Frame {int(prev_keyframe.co.x)}")
         else:
-            self.report({'INFO'}, "Primeiro keyframe")
-        return {'FINISHED'}
-
-class TIME_OFFSET_OT_finish_context_draw(Operator):
-    """Finaliza desenho com contexto e restaura estados originais"""
-    bl_idname = "time_offset.finish_context_draw"
-    bl_label = "Finalizar Desenho"
-    bl_options = {'REGISTER'}
-    
-    @classmethod
-    def poll(cls, context):
-        obj = context.active_object
-        return obj and "timeoffset_saved_offset" in obj
-    
-    def execute(self, context):
-        obj = context.active_object
-        time_mod = helpers.get_time_offset_modifier(obj)
-        
-        if not time_mod:
-            self.report({'WARNING'}, "Modificador não encontrado")
-            return {'CANCELLED'}
-        
-        # 1. RESTAURA O FRAME DA TIMELINE ORIGINAL
-        if "timeoffset_saved_timeline" in obj:
-            context.scene.frame_current = obj["timeoffset_saved_timeline"]
-        
-        # 2. RESTAURA O OFFSET ORIGINAL DO MODIFICADOR
-        if "timeoffset_saved_offset" in obj:
-            time_mod.offset = obj["timeoffset_saved_offset"]
-            del obj["timeoffset_saved_offset"]
-        
-        # 3. RESTAURA VISIBILIDADE ORIGINAL
-        if "timeoffset_saved_viewport" in obj:
-            time_mod.show_viewport = obj["timeoffset_saved_viewport"]
-            del obj["timeoffset_saved_viewport"]
-        
-        if "timeoffset_saved_editmode" in obj:
-            time_mod.show_in_editmode = obj["timeoffset_saved_editmode"]
-            del obj["timeoffset_saved_editmode"]
-        
-        # 4. DESATIVA OVERLAY
-        disable_overlay_global(context)
-        
-        # 5. LIMPA METADADOS DO OBJETO
-        for prop in ["timeoffset_saved_timeline", "timeoffset_new_frame"]:
-            if prop in obj:
-                del obj[prop]
-        
-        # 6. LIMPA METADADOS DA CENA
-        for prop in ["timeoffset_active_overlay", "timeoffset_overlay_opacity", 
-                    "timeoffset_timeline_frame"]:
-            if prop in context.scene:
-                del context.scene[prop]
-        
-        self.report({'INFO'}, "✅ Modo contexto finalizado. Estados restaurados.")
-        
-        # Força redraw
-        for area in context.screen.areas:
-            if area.type == 'VIEW_3D':
-                area.tag_redraw()
-        
-        return {'FINISHED'}
-
-class TIME_OFFSET_OT_show_library_frame(Operator):
-    """Mostra o frame da biblioteca que foi modificado"""
-    bl_idname = "time_offset.show_library_frame"
-    bl_label = "Ver Frame Modificado"
-    bl_options = {'REGISTER'}
-    
-    def execute(self, context):
-        obj = context.active_object
-        time_mod = helpers.get_time_offset_modifier(obj)
-        
-        if not time_mod:
-            return {'CANCELLED'}
-        
-        if "timeoffset_active_overlay" in context.scene:
-            library_frame = context.scene["timeoffset_active_overlay"]
-            
-            # Salva frame atual para poder voltar
-            context.scene["timeoffset_return_to_timeline"] = context.scene.frame_current
-            
-            # Vai para o frame da biblioteca
-            time_mod.offset = library_frame
-            # Reativa viewport
-            time_mod.show_viewport = True
-            # Desativa overlay temporariamente
-            disable_overlay_global(context)
-            
-            self.report({'INFO'}, f"Mostrando frame da biblioteca {library_frame}")
-        else:
-            self.report({'WARNING'}, "Nenhum frame overlay ativo")
-        
-        return {'FINISHED'}
-
-class TIME_OFFSET_OT_return_to_timeline(Operator):
-    """Volta para o frame da timeline (modo contexto)"""
-    bl_idname = "time_offset.return_to_timeline"
-    bl_label = "Voltar à Timeline"
-    bl_options = {'REGISTER'}
-    
-    def execute(self, context):
-        obj = context.active_object
-        time_mod = helpers.get_time_offset_modifier(obj)
-        
-        if not time_mod:
-            return {'CANCELLED'}
-        
-        if "timeoffset_return_to_timeline" in context.scene:
-            timeline_frame = context.scene["timeoffset_return_to_timeline"]
-            
-            # Volta timeline
-            context.scene.frame_current = timeline_frame
-            
-            # Volta modifier para o frame overlay
-            if "timeoffset_active_overlay" in context.scene:
-                time_mod.offset = context.scene["timeoffset_active_overlay"]
-                # Desabilita viewport do modificador
-                time_mod.show_viewport = False
-                
-                # Reativa overlay
-                opacity = context.scene.get("timeoffset_overlay_opacity", 0.3)
-                setup_timeline_overlay_global(context, timeline_frame, opacity)
-            
-            del context.scene["timeoffset_return_to_timeline"]
-            
-            self.report({'INFO'}, f"Voltou ao modo contexto")
-        
+            self.report({'INFO'}, "Primeiro keyframe alcançado")
         return {'FINISHED'}
 
 class TIME_OFFSET_OT_insert_keyframe_timeline(Operator):
@@ -1191,6 +1163,7 @@ class TIME_OFFSET_OT_insert_keyframe_timeline(Operator):
         return obj is not None and gp_api.obj_is_gp(obj)
 
     def execute(self, context):
+        # Procurar uma área válida para override
         area = None
         for a in context.screen.areas:
             if a.type in {'DOPESHEET_EDITOR', 'GRAPH_EDITOR', 'TIMELINE'}:
@@ -1198,24 +1171,30 @@ class TIME_OFFSET_OT_insert_keyframe_timeline(Operator):
                 break
 
         if not area:
-            self.report({'WARNING'}, "Abra uma Dope Sheet, Graph Editor ou Timeline")
+            self.report({'WARNING'}, "Nenhuma Dope Sheet, Graph Editor ou Timeline aberta. Abra uma para inserir keyframes.")
             return {'CANCELLED'}
 
+        # Criar override de contexto correto
         override = context.copy()
         override['area'] = area
         override['region'] = [r for r in area.regions if r.type == 'WINDOW'][0]
         override['space_data'] = area.spaces.active
 
         try:
+            # Forma correta e compatível com Blender 4.2+
             with context.temp_override(**override):
                 result = bpy.ops.action.keyframe_insert(type='ALL')
 
             if result == {'FINISHED'}:
-                self.report({'INFO'}, f"Keyframes inseridos no frame {context.scene.frame_current}")
+                frame = context.scene.frame_current
+                self.report({'INFO'}, f"Keyframes inseridos no frame {frame}")
+            else:
+                self.report({'WARNING'}, "Falha ao inserir keyframes (verifique seleção ou animação)")
+
             return result
 
         except Exception as e:
-            self.report({'ERROR'}, f"Erro: {str(e)}")
+            self.report({'ERROR'}, f"Erro ao inserir keyframes: {str(e)}")
             return {'CANCELLED'}
 
 class TIME_OFFSET_OT_remove_keyframe_timeline(Operator):
@@ -1229,11 +1208,15 @@ class TIME_OFFSET_OT_remove_keyframe_timeline(Operator):
         obj = context.active_object
         if not obj or not gp_api.obj_is_gp(obj):
             return False
+        
+        # Opcional: só permitir se tiver alguma animação
         if not obj.animation_data or not obj.animation_data.action:
             return False
+        
         return True
 
     def execute(self, context):
+        # Procuramos uma área de animação aberta (Dope Sheet, Graph Editor, etc.)
         anim_area = None
         for area in context.screen.areas:
             if area.type in {'DOPESHEET_EDITOR', 'GRAPH_EDITOR', 'TIMELINE'}:
@@ -1241,89 +1224,149 @@ class TIME_OFFSET_OT_remove_keyframe_timeline(Operator):
                 break
 
         if not anim_area:
-            self.report({'WARNING'}, "Abra uma Dope Sheet ou Graph Editor")
+            self.report({'WARNING'}, "Abra uma Dope Sheet ou Graph Editor para remover keyframes.")
             return {'CANCELLED'}
 
+        # Criamos o override mais simples possível
         override = context.copy()
         override['area'] = anim_area
         override['space_data'] = anim_area.spaces.active
         
+        # Pegamos a região WINDOW (geralmente a última ou a maior)
         for region in anim_area.regions:
             if region.type == 'WINDOW':
                 override['region'] = region
                 break
+        else:
+            self.report({'ERROR'}, "Não foi possível encontrar região válida na área de animação.")
+            return {'CANCELLED'}
 
         try:
+            # Chamamos o delete com o contexto correto
             with context.temp_override(**override):
                 result = bpy.ops.action.delete()
 
             if result == {'FINISHED'}:
-                self.report({'INFO'}, "Keyframes removidos")
+                self.report({'INFO'}, "Keyframes selecionados removidos")
+            else:
+                self.report({'INFO'}, "Nenhum keyframe foi removido (verifique se algo está selecionado)")
+
             return result
 
         except Exception as e:
-            self.report({'ERROR'}, f"Erro: {str(e)}")
+            self.report({'ERROR'}, f"Erro ao remover keyframes: {str(e)}")
             return {'CANCELLED'}
-        
+
 class TIME_OFFSET_OT_assign_all_frames(Operator):
-    """Assign automático de TODOS os frames para os vertex groups correspondentes"""
+    """Assign automático de TODOS os keyframes selecionados para o vertex group ativo"""
     bl_idname = "time_offset.assign_all_frames"
-    bl_label = "Assign Todos Frames"
+    bl_label = "Assign Keyframes Selecionados"
     bl_options = {'REGISTER', 'UNDO'}
     
     @classmethod
     def poll(cls, context):
         obj = context.active_object
-        return obj and gp_api.obj_is_gp(obj) and obj.vertex_groups
+        # Só permite em Edit Mode, com vertex group ativo e multi-frame ativado
+        return (obj and gp_api.obj_is_gp(obj) and 
+                obj.mode == 'EDIT' and
+                gp_api.get_multiedit(obj))  # Usar função do api_route
     
     def execute(self, context):
         obj = context.active_object
-        total_assignments = 0
-        layers_processed = 0
+        active_vgroup = obj.vertex_groups.active
+        
+        if not active_vgroup:
+            self.report({'WARNING'}, "Nenhum vertex group ativo selecionado")
+            return {'CANCELLED'}
+        
+        print(f"\n=== Assign Multi-Frame para grupo '{active_vgroup.name}' ===")
+        
+        # Guardar estado original
+        old_frame = context.scene.frame_current
+        frames_assigned = 0
+        total_strokes = 0
+        
+        # Coletar TODOS os frames que estão em multi-frame editing
+        frames_to_process = set()
         
         for layer in obj.data.layers:
             if gp_api.layer_locked(layer) or gp_api.layer_hidden(layer):
                 continue
-                
-            layer_name = self.normalize_name(layer.info)
-            matching_groups = self.find_matching_groups(obj, layer_name)
-            
-            if not matching_groups:
-                continue
             
             for frame in layer.frames:
-                for vgroup in matching_groups:
-                    if self.assign_frame_to_group(obj, frame, vgroup):
-                        total_assignments += 1
+                # No multi-frame editing, todos os frames são considerados
+                frames_to_process.add(frame.frame_number)
+        
+        print(f"  Frames encontrados: {sorted(frames_to_process)}")
+        
+        if not frames_to_process:
+            self.report({'WARNING'}, "Nenhum frame encontrado")
+            return {'CANCELLED'}
+        
+        # Processar cada frame
+        for frame_number in sorted(frames_to_process):
+            # Ir para o frame
+            context.scene.frame_current = frame_number
+            context.view_layer.update()
             
-            layers_processed += 1
+            # Usar api_route para selecionar tudo
+            try:
+                gp_api.op_select_all()  # Usar função do api_route
+            except:
+                # Fallback: tentar método alternativo
+                try:
+                    bpy.ops.grease_pencil.select_all(action='SELECT')
+                except:
+                    print(f"  Frame {frame_number}: não foi possível selecionar")
+                    continue
+            
+            # Verificar se há algo selecionado (opcional - pode pular para performance)
+            has_selection = True  # Assumir que tem seleção
+            
+            if has_selection:
+                # Executar o assign
+                try:
+                    # O assign ainda é o mesmo operador
+                    bpy.ops.object.vertex_group_assign()
+                    frames_assigned += 1
+                    
+                    # Contar strokes (opcional, para relatório)
+                    stroke_count = 0
+                    for layer in obj.data.layers:
+                        for frame in layer.frames:
+                            if frame.frame_number == frame_number:
+                                if hasattr(frame, 'strokes'):
+                                    stroke_count = len(frame.strokes)
+                                elif hasattr(frame, 'nuclear_strokes'):
+                                    stroke_count = len(list(frame.nuclear_strokes))
+                                break
+                    
+                    total_strokes += stroke_count
+                    print(f"  Frame {frame_number}: assign realizado ({stroke_count} strokes)")
+                    
+                except Exception as e:
+                    print(f"  Frame {frame_number}: erro no assign - {e}")
+            
+            # Deselecionar para o próximo frame
+            try:
+                gp_api.op_deselect()  # Usar função do api_route
+            except:
+                try:
+                    bpy.ops.grease_pencil.select_all(action='DESELECT')
+                except:
+                    pass
+        
+        # Restaurar frame original
+        context.scene.frame_current = old_frame
+        context.view_layer.update()
+        
+        print(f"=== Concluído: {frames_assigned} frames processados, {total_strokes} strokes assignados ===\n")
         
         self.report({'INFO'}, 
-                   f"Assign completo: {total_assignments} atribuições em {layers_processed} layers")
+                   f"Assign: {frames_assigned} frames para grupo '{active_vgroup.name}' "
+                   f"({total_strokes} strokes)")
+        
         return {'FINISHED'}
-    
-    def normalize_name(self, name):
-        return name.lower().strip().replace(' ', '_')
-    
-    def find_matching_groups(self, obj, layer_name):
-        matching = []
-        for vgroup in obj.vertex_groups:
-            vgroup_name = self.normalize_name(vgroup.name)
-            if layer_name == vgroup_name or vgroup_name in layer_name:
-                matching.append(vgroup)
-        return matching
-    
-    def assign_frame_to_group(self, obj, frame, vgroup):
-        try:
-            if hasattr(frame, 'strokes'):
-                for stroke in frame.strokes:
-                    stroke.vertex_groups.append(vgroup)
-            elif hasattr(frame, 'nuclear_strokes'):
-                for stroke in frame.nuclear_strokes:
-                    pass
-            return True
-        except:
-            return False
 
 class TIME_OFFSET_PT_main_panel(Panel):
     """Painel principal do TimeOffset Tool"""
@@ -1349,22 +1392,26 @@ class TIME_OFFSET_PT_main_panel(Panel):
         time_mod = helpers.get_time_offset_modifier(obj)
 
         if not time_mod:
-                box = layout.box()
-                box.alert = True
-                box.label(text="Modificador TimeOffset não encontrado!", icon='ERROR')
-                box.label(text="Adicione o modificador para usar as funções completas")
-                box.operator("object.gpencil_modifier_add", text="Adicionar TimeOffset").type = 'GP_TIME'
-                return
+            box = layout.box()
+            box.alert = True
+            box.label(text="Modificador TimeOffset não encontrado!", icon='ERROR')
+            box.label(text="Adicione o modificador para usar as funções completas")
+            box.operator("object.gpencil_modifier_add", text="Adicionar TimeOffset").type = 'GP_TIME'
+            return
 
         library_frame = time_mod.offset
+        current_frame = context.scene.frame_current
 
+        # ============================================
+        # PREVIEW DO FRAME DA BIBLIOTECA
+        # ============================================
         layout.separator()
         preview_key = helpers.get_library_preview(obj, library_frame)
         pcoll = helpers.get_preview_collection()    
 
         if preview_key and preview_key in pcoll:
             preview_box = layout.box()
-            preview_box.label(text="Preview do Frame", icon='IMAGE_DATA')
+            preview_box.label(text=f"Preview Frame {library_frame}", icon='IMAGE_DATA')
             preview_box.template_icon(
                 icon_value=pcoll[preview_key].icon_id,
                 scale=6
@@ -1374,7 +1421,9 @@ class TIME_OFFSET_PT_main_panel(Panel):
             preview_box.label(text="Preview indisponível", icon='IMAGE_DATA')
             preview_box.label(text=f"Frame {library_frame}")
 
-        # Informações do modificador
+        # ============================================
+        # INFORMAÇÕES DA BIBLIOTECA
+        # ============================================
         box = layout.box()
         box.label(text="Biblioteca de Frames", icon='LIBRARY_DATA_DIRECT')
 
@@ -1393,68 +1442,122 @@ class TIME_OFFSET_PT_main_panel(Panel):
         anim_icon = 'ANIM' if is_animated else 'KEYFRAME'
         box.label(text=f"Animado: {'SIM' if is_animated else 'NÃO'}", icon=anim_icon)
 
-        box.separator()
-        box.label(text=f"Exibindo Frame da Biblioteca: {library_frame}", icon='RESTRICT_VIEW_OFF')
+        # ============================================
+        # CONTROLES DE EDIÇÃO
+        # ============================================
+        layout.separator()
+        layout.label(text="Controles de Edição", icon='TOOL_SETTINGS')
+        
+        # Toggle do modificador
+        row = layout.row(align=True)
+        row.prop(time_mod, "show_in_editmode", text="Editar", toggle=True)
+        row.prop(time_mod, "show_viewport", text="Visualizar", toggle=True)
+        row.prop(time_mod, "show_render", text="Render", toggle=True)
 
-        # Controles de edição
-        row = layout.row()
-        row.prop(time_mod, "show_in_editmode", text="Permitir Edição", toggle=True)
-        row.prop(time_mod, "show_viewport", text="", toggle=True)
-        row.prop(time_mod, "show_render", text="", toggle=True)
-
-        # Botões de ação de frames
+        # ============================================
+        # GERENCIAMENTO DE FRAMES (POSITIVO → BIBLIOTECA)
+        # ============================================
+        layout.separator()
+        layout.label(text="Frame Positivo → Biblioteca", icon='FORWARD')
+        
         col = layout.column(align=True)
+        
+        # Duplicar frame atual para edição local
+        col.operator(
+            "time_offset.duplicate_current_positive", 
+            text=f"Duplicar Frame {current_frame} (Edição Local)",
+            icon='DUPLICATE'
+        )
+        
+        # Enviar edição para biblioteca
+        row = col.row(align=True)
+        row.operator(
+            "time_offset.capture_edited_to_library", 
+            text=f"Enviar Frame {current_frame} para Biblioteca",
+            icon='EXPORT'
+        )
+        row.prop(time_mod, "show_viewport", text="", icon='RESTRICT_VIEW_OFF')
+
+        # ============================================
+        # GERENCIAMENTO DA BIBLIOTECA (FRAMES NEGATIVOS)
+        # ============================================
+        layout.separator()
+        layout.label(text="Biblioteca (Frames Negativos)", icon='LIBRARY_DATA_DIRECT')
+        
+        col = layout.column(align=True)
+        
+        # Criar novo frame limpo
         col.operator("time_offset.create_clean_frame", icon='ADD')
         
-        # Botão principal DUPLICAR (agora com contexto)
-        dup_op = col.operator("time_offset.duplicate_current_frame",
-                     text=f"Duplicar Keyframe {library_frame}",
-                     icon='DUPLICATE')
-        dup_op.reference_opacity = 0.3  # Opacidade padrão
+        # Duplicar frame atual da biblioteca
+        col.operator(
+            "time_offset.duplicate_current_frame",
+            text=f"Duplicar Frame {library_frame} (Biblioteca)",
+            icon='COPY_ID'
+        )
         
-        col.operator("time_offset.update_current_preview", 
-                     text="Atualizar Preview Atual", 
-                     icon='FILE_REFRESH')
-
-        # Flip Horizontal
-        flip_op = col.operator("time_offset.flip_horizontal", text="Flip Horizontal", icon='UV_SYNC_SELECT')
-        flip_op.insert_offset_keyframe = False
+        # Seção: Biblioteca → Timeline (Edição)
+        layout.separator()
+        layout.label(text="Editar Frame da Biblioteca", icon='GREASEPENCIL')
 
         col = layout.column(align=True)
-        col.operator("time_offset.assign_all_frames", 
-                    text="Assign Todos Frames", 
-                    icon='GROUP_VERTEX')
+        # Trazer frame da biblioteca para timeline
+        col.operator(
+            "time_offset.bring_to_timeline",
+            text=f"Trazer Frame {library_frame} para Timeline {current_frame}",
+            icon='COPYDOWN'
+        )
+
+        # Desligar modificador automaticamente (já faz no operador)
+        col.prop(time_mod, "show_viewport", text="Ver Edição Local", icon='RESTRICT_VIEW_OFF')
+
+        # Seção: Timeline → Biblioteca (Salvar)
+        layout.separator()
+        layout.label(text="Salvar na Biblioteca", icon='EXPORT')
+
+        col = layout.column(align=True)
+        # Enviar timeline para biblioteca
+        col.operator(
+            "time_offset.send_to_library",
+            text=f"Enviar Frame {current_frame} para Biblioteca",
+            icon='IMPORT'
+        )
+
+        # Atualizar preview
+        col.operator(
+            "time_offset.update_current_preview", 
+            text="Atualizar Preview Atual", 
+            icon='FILE_REFRESH'
+        )
+
+        # ============================================
+        # NAVEGAÇÃO NA BIBLIOTECA
+        # ============================================
+        layout.separator()
+        layout.label(text="Navegação na Biblioteca", icon='VIEW_PAN')
         
-        # Navegação na biblioteca
         col = layout.column(align=True)
         row = col.row(align=True)
         row.operator("time_offset.navigate_previous", text="Anterior", icon='TRIA_LEFT')
         row.operator("time_offset.navigate_next", text="Próximo", icon='TRIA_RIGHT')
-
         col.operator("time_offset.go_to_first_library_frame", text="Primeiro da Biblioteca", icon='REW')
 
-        # MODO CONTEXTO - Se estiver ativo
-        if "timeoffset_active_overlay" in context.scene:
-            box = layout.box()
-            box.label(text="🎨 MODO CONTEXTO ATIVO", icon='INFO')
-            box.label(text=f"Editando frame: {context.scene['timeoffset_active_overlay']}")
-            box.label(text=f"Referência: frame {context.scene['timeoffset_timeline_frame']}")
-            
-            row = box.row(align=True)
-            row.operator("time_offset.show_library_frame", 
-                        text="Ver Frame", 
-                        icon='HIDE_OFF')
-            row.operator("time_offset.return_to_timeline", 
-                        text="Voltar", 
-                        icon='LOOP_BACK')
-            
-            box.operator("time_offset.finish_context_draw", 
-                        text="Finalizar", 
-                        icon='CHECKMARK')
+        # ============================================
+        # FERRAMENTAS EXTRAS
+        # ============================================
+        layout.separator()
+        layout.label(text="Ferramentas Extras", icon='TOOL_SETTINGS')
+        
+        col = layout.column(align=True)
+        col.operator("time_offset.flip_horizontal", text="Flip Horizontal", icon='UV_SYNC_SELECT')
+        col.operator("time_offset.assign_all_frames", text="Assign Todos Frames", icon='GROUP_VERTEX')
 
-        # Seção de animação
+        # ============================================
+        # ANIMAÇÃO DO OFFSET
+        # ============================================
         layout.separator()
         layout.label(text="Animação do Offset", icon='ANIM')
+        
         col = layout.column(align=True)
         if is_animated:
             row = col.row(align=True)
@@ -1467,12 +1570,16 @@ class TIME_OFFSET_PT_main_panel(Panel):
         else:
             col.operator("time_offset.animate_offset", text="Iniciar Animação", icon='KEYFRAME_HLT')
 
-        # Status atual da timeline
+        # ============================================
+        # STATUS DA TIMELINE
+        # ============================================
         layout.separator()
-        current_frame = context.scene.frame_current
         max_positive_frame = helpers.get_max_positive_frame_number(obj)
-        layout.label(text=f"Timeline: Frame {current_frame}", icon='TIME')
-        layout.label(text=f"Frames positivos: 0 a {max_positive_frame}", icon='PMARKER')
+        
+        box = layout.box()
+        box.label(text=f"Timeline: Frame {current_frame}", icon='TIME')
+        box.label(text=f"Frames positivos: 0 a {max_positive_frame}", icon='PMARKER')
+        box.label(text=f"Biblioteca atual: {library_frame}", icon='BOOKMARKS')
 
 class TIME_OFFSET_PT_missing_modifier(Panel):
     """Painel de aviso quando não há modificador TimeOffset"""
@@ -1519,58 +1626,65 @@ class TIME_OFFSET_OT_update_current_preview(Operator):
 
         pose_id = helpers.get_pose_id(obj, current_library_frame)
         if not pose_id:
-            self.report({'WARNING'}, f"Frame {current_library_frame} sem pose_id")
+            self.report({'WARNING'}, f"Frame {current_library_frame} sem pose_id. Crie/duplique o frame primeiro.")
             return {'CANCELLED'}
 
+        # Caminho do arquivo
         preview_dir = os.path.join(bpy.app.tempdir, "timeoffset_previews", obj.name)
         filepath = os.path.join(preview_dir, f"{pose_id}.png")
 
+        # Remove arquivo antigo para forçar recriação
         if os.path.exists(filepath):
             try:
                 os.remove(filepath)
-            except:
-                pass
+                print(f"DEBUG: Arquivo antigo removido: {filepath}")
+            except Exception as e:
+                print(f"DEBUG: Erro ao remover arquivo antigo: {e}")
 
-        try:
-            helpers.generate_library_preview(obj, current_library_frame)
-        except Exception as e:
-            print(f"⚠️ Aviso: {e}")
+        # Gera o novo preview (vai criar o PNG novo)
+        helpers.generate_library_preview(obj, current_library_frame)
 
+        # Força recarregamento na coleção de previews
         pcoll = helpers.get_preview_collection()
         key = f"{obj.name}_{pose_id}"
 
+        # Remove a entrada antiga da coleção (importante!)
         if key in pcoll:
-            try:
-                pcoll.unload(key)
-            except:
-                pass
+            pcoll.unload(key)  # Descarrega da memória
+            print(f"DEBUG: Imagem antiga descarregada da coleção: {key}")
 
+        # Recarrega o arquivo novo com a mesma chave
         try:
             pcoll.load(key, filepath, 'IMAGE')
-        except:
-            pass
+            print(f"DEBUG: Nova imagem carregada: {key}")
+        except Exception as e:
+            print(f"DEBUG: Erro ao recarregar preview: {e}")
+            self.report({'ERROR'}, "Falha ao recarregar a imagem no painel")
+            return {'CANCELLED'}
 
+        # Invalidar tudo para garantir refresh do UI
         helpers.invalidate_library_previews()
 
+        # Força redraw do painel (muito útil!)
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
 
-        self.report({'INFO'}, f"Preview atualizado para frame {current_library_frame}")
+        self.report({'INFO'}, f"Preview atualizado com sucesso para frame {current_library_frame}")
         return {'FINISHED'}
 
-# Lista de classes para registro
+# Graças a deus é pouca classe
 classes = (
-    TIME_OFFSET_OT_return_to_reference,
     TIME_OFFSET_OT_create_clean_frame,
-    TIME_OFFSET_OT_duplicate_current_frame,  # Agora é o principal
+    TIME_OFFSET_OT_duplicate_current_frame,
+    TIME_OFFSET_OT_bring_to_timeline,
+    TIME_OFFSET_OT_send_to_library,
+    TIME_OFFSET_OT_duplicate_current_positive,
+    TIME_OFFSET_OT_capture_edited_to_library,
     TIME_OFFSET_OT_toggle_edit_mode,
     TIME_OFFSET_OT_navigate_previous,
     TIME_OFFSET_OT_navigate_next,
     TIME_OFFSET_OT_go_to_first_library_frame,
-    TIME_OFFSET_OT_finish_context_draw,
-    TIME_OFFSET_OT_show_library_frame,
-    TIME_OFFSET_OT_return_to_timeline,
     TIME_OFFSET_OT_animate_offset,
     TIME_OFFSET_OT_remove_animation,
     TIME_OFFSET_OT_next_keyframe,
@@ -1579,7 +1693,9 @@ classes = (
     TIME_OFFSET_OT_remove_keyframe_timeline,
     TIME_OFFSET_OT_assign_all_frames,
     TIME_OFFSET_OT_flip_horizontal,
+    TIME_OFFSET_OT_flip_horizontal_object,
     TIME_OFFSET_PT_main_panel,
     TIME_OFFSET_PT_missing_modifier,
     TIME_OFFSET_OT_update_current_preview,
 )
+

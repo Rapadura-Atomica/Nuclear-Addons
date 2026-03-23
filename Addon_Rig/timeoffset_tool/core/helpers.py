@@ -1,5 +1,5 @@
 """
-Utility modules associated with timeoffset
+Modulo de Helpers para operadores
 """
 
 
@@ -114,7 +114,6 @@ def generate_library_preview(obj, frame):
     scene.frame_set(frame)
     bpy.context.view_layer.update()
     
-    # Preparar diretório
     preview_dir = os.path.join(
         bpy.app.tempdir,
         "timeoffset_previews",
@@ -124,67 +123,77 @@ def generate_library_preview(obj, frame):
     
     pose_id = get_pose_id(obj, frame)
     if not pose_id:
-        print(f"❌ Frame {frame} sem pose_id, preview cancelado")
+        print("❌ Frame sem pose_id, preview cancelado")
         scene.frame_set(old_frame)
         return
     
     filepath = os.path.join(preview_dir, f"{pose_id}.png")
     
-    # Se já existe, não recriar
     if os.path.exists(filepath):
-        print(f"ℹ️ Preview já existe: {filepath}")
+        print("ℹ️ Preview já existe, não será recriado")
         scene.frame_set(old_frame)
         return
     
-    # Procurar área 3D
-    screenshot_taken = False
+    # Configurações de renderização compatíveis com Blender 5.0
+    old_file_format = scene.render.image_settings.file_format
+    
+    # No Blender 5.0, as opções são diferentes
+    try:
+        # Tentar primeiro com PNG (Blender < 5.0)
+        scene.render.image_settings.file_format = 'PNG'
+    except TypeError:
+        # Se falhar, tentar formatos do Blender 5.0+
+        try:
+            scene.render.image_settings.file_format = 'IMAGE'
+            # Em versões mais novas, precisa configurar o formato dentro de 'IMAGE'
+            if hasattr(scene.render.image_settings, 'color_mode'):
+                scene.render.image_settings.color_mode = 'RGBA'
+        except:
+            # Último recurso: tentar FFMPEG com PNG
+            scene.render.image_settings.file_format = 'FFMPEG'
+            scene.render.ffmpeg.format = 'PNG'
+    
+    # Configurar cores (pode ser que precise de ajustes diferentes por versão)
+    try:
+        scene.render.image_settings.color_mode = 'RGBA'
+        scene.render.image_settings.color_depth = '8'
+        scene.render.image_settings.compression = 15
+    except:
+        pass  # Ignora se não existirem nessas versões
+    
     for area in bpy.context.window.screen.areas:
         if area.type == 'VIEW_3D':
-            # Encontrar a região WINDOW
-            region = None
-            for r in area.regions:
-                if r.type == 'WINDOW':
-                    region = r
-                    break
-            
+            region = next(
+                (r for r in area.regions if r.type == 'WINDOW'),
+                None
+            )
             if not region:
                 continue
             
-            # Tirar screenshot
-            try:
-                # Forçar atualização da viewport
-                bpy.context.view_layer.update()
-                
-                # Override de contexto
-                override = {
-                    'area': area,
-                    'region': region,
-                    'screen': bpy.context.screen,
-                    'window': bpy.context.window
-                }
-                
-                with bpy.context.temp_override(**override):
-                    bpy.ops.screen.screenshot(
-                        filepath=filepath,
-                        check_existing=False,
-                        full=False
+            old_filepath = scene.render.filepath
+            scene.render.filepath = filepath
+            
+            with bpy.context.temp_override(
+                scene=scene,
+                area=area,
+                region=region,
+            ):
+                try:
+                    bpy.ops.render.opengl(
+                        write_still=True,
+                        view_context=True
                     )
-                print(f"✅ Screenshot salvo: {filepath}")
-                screenshot_taken = True
-                break
-            except Exception as e:
-                print(f"⚠️ Erro no screenshot (não crítico): {e}")
-                # Não interrompe o fluxo principal
-                continue
+                except Exception as e:
+                    print(f"❌ Erro no render: {e}")
+            
+            scene.render.filepath = old_filepath
+            break
     
-    if not screenshot_taken:
-        print("⚠️ Não foi possível tirar screenshot - continuando sem preview")
-    
-    # Voltar ao frame original
+    # Restaurar configurações originais
+    scene.render.image_settings.file_format = old_file_format
     scene.frame_set(old_frame)
     bpy.context.view_layer.update()
     
-    # Invalidar previews para forçar recarregamento
     invalidate_library_previews()
 
 def get_library_preview(obj, frame):
