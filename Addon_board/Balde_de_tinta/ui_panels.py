@@ -12,12 +12,32 @@ class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
+        prefs = context.preferences.addons[__package__].preferences
 
-        # Botão do Balde de Tinta simplificado
-        row = layout.row()
-        row.operator("gpencil.nijigp_simple_bucket_fill", icon='SHADING_SOLID')
+        # Bucket Fill Tool
+        box = layout.box()
+        box.label(text="Bucket Fill", icon='SHADING_SOLID')
         
-        # Mantém os operadores originais (opcional)
+        # Operator button
+        row = box.row()
+        row.operator("gpencil.nijigp_simple_bucket_fill", text="Fill", icon='SHADING_SOLID')
+        
+        # Tolerance slider
+        row = box.row()
+        row.prop(prefs, "bucket_fill_tolerance", text="Tolerance (px)")
+        
+        # Fill layer option
+        row = box.row()
+        row.prop(prefs, "bucket_fill_use_fill_layer", text="Use Fill Layer")
+        
+        if prefs.bucket_fill_use_fill_layer:
+            row = box.row()
+            row.prop(prefs, "bucket_fill_layer_name", text="Fill Layer")
+        
+        # Separator
+        layout.separator()
+        
+        # Original operators
         row = layout.row()
         row.operator("gpencil.nijigp_fit_last", icon='MOD_SMOOTH')
         row = layout.row()

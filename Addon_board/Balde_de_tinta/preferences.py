@@ -296,6 +296,26 @@ class NijiGPAddonPreferences(bpy.types.AddonPreferences):
     )
     captured_logs = []
     
+    bucket_fill_tolerance: bpy.props.FloatProperty(
+        name="Bucket Fill Tolerance",
+        description="How far from the stroke boundary the click can be to still fill the area",
+        default=15.0,
+        min=0.0,
+        max=100.0,
+        step=1,
+        subtype='PIXEL'
+    )
+    bucket_fill_use_fill_layer: bpy.props.BoolProperty(
+        name="Use Fill Layer",
+        description="Place fill strokes in a separate layer instead of the active layer",
+        default=True
+    )
+    bucket_fill_layer_name: bpy.props.StringProperty(
+        name="Fill Layer Name",
+        description="Name of the layer where fill strokes will be placed",
+        default="Fills"
+    )
+
     shortcut_button_enabled: bpy.props.BoolProperty(
         name='Enable Viewport Gizmos',
         description='Add a group of buttons at the bottom of the 3D view that brings better touchscreen control',

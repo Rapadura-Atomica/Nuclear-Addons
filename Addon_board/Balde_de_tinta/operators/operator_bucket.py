@@ -32,6 +32,10 @@ from .common import (
 from ..solvers.graph import SmartFillSolver
 
 
+# Constant for addon name
+ADDON_NAME = "Balde_de_tinta"
+
+
 class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
     """Fill a closed area with the active material by clicking inside it"""
     bl_idname = "gpencil.nijigp_simple_bucket_fill"
@@ -49,10 +53,30 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             return False
         return context.mode in {'EDIT_GPENCIL', 'PAINT_GPENCIL', 'EDIT_GREASE_PENCIL', 'PAINT_GREASE_PENCIL'}
 
+    def get_preferences(self, context):
+        """Get addon preferences safely"""
+        try:
+            return context.preferences.addons[ADDON_NAME].preferences
+        except KeyError:
+            return None
+
     def invoke(self, context, event):
         """Activate modal mode to wait for click"""
         if context.area:
             context.area.tag_redraw()
+        
+        # Get preferences for bucket fill settings
+        prefs = self.get_preferences(context)
+        
+        if prefs:
+            self.click_tolerance = prefs.bucket_fill_tolerance
+            self.use_fill_layer = prefs.bucket_fill_use_fill_layer
+            self.fill_layer_name = prefs.bucket_fill_layer_name
+        else:
+            # Default values if preferences not available
+            self.click_tolerance = 15.0
+            self.use_fill_layer = True
+            self.fill_layer_name = "Fills"
         
         # Store the current object and mode
         self.gp_obj = context.object
@@ -70,7 +94,10 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         context.window.cursor_modal_set('EYEDROPPER')
         
         self._waiting_for_click = True
-        self.report({"INFO"}, "Click inside the area you want to fill")
+        
+        # Build info message
+        layer_info = f" -> Fill Layer: {self.fill_layer_name}" if self.use_fill_layer else ""
+        self.report({"INFO"}, f"Click inside the area you want to fill (tolerance: {self.click_tolerance:.0f}px){layer_info}")
         
         return {'RUNNING_MODAL'}
 
@@ -83,6 +110,15 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "No active layer found")
             return {'CANCELLED'}
         
+        # Get or create fill layer if needed
+        if self.use_fill_layer:
+            self.fill_layer = self.get_or_create_fill_layer(gp_obj)
+            if not self.fill_layer:
+                self.report({"WARNING"}, f"Could not create fill layer: {self.fill_layer_name}")
+                return {'CANCELLED'}
+        else:
+            self.fill_layer = active_layer
+        
         # Get current frame
         if is_gpv3():
             self.current_frame = active_layer.active_frame
@@ -92,7 +128,13 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         if not self.current_frame:
             self.current_frame = active_layer.frames.new(context.scene.frame_current)
         
-        # Get all strokes from the current frame (these are the boundaries)
+        # Get fill frame (same frame number as current frame)
+        if self.use_fill_layer:
+            self.fill_frame = self.get_or_create_frame(self.fill_layer, self.current_frame.frame_number)
+        else:
+            self.fill_frame = self.current_frame
+        
+        # Get all strokes from the active layer (these are the boundaries)
         self.all_strokes = get_input_strokes(gp_obj, self.current_frame, select_all=True)
         
         if len(self.all_strokes) < 1:
@@ -123,9 +165,9 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         # Create depth lookup tree
         self.depth_lookup = DepthLookupTree(self.poly_list, self.depth_list)
         
-        # Triangulate the line art
+        # Triangulate the line art with higher resolution for better tolerance
         self.tr_map = lineart_triangulation(
-            self.all_strokes, self.t_mat, self.poly_list, self.scale_factor, 0.05
+            self.all_strokes, self.t_mat, self.poly_list, self.scale_factor, 0.02
         )
         
         if len(self.tr_map['triangles']) < 1:
@@ -136,7 +178,43 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         self.solver = SmartFillSolver()
         self.solver.build_graph(self.tr_map)
         
+        # Precompute triangle centers for distance-based fallback
+        self.triangle_centers = []
+        for tri in self.tr_map['triangles']:
+            v0 = Vector(self.tr_map['vertices'][tri[0]])
+            v1 = Vector(self.tr_map['vertices'][tri[1]])
+            v2 = Vector(self.tr_map['vertices'][tri[2]])
+            center = (v0 + v1 + v2) / 3
+            self.triangle_centers.append(center)
+        
         return {'FINISHED'}
+
+    def get_or_create_fill_layer(self, gp_obj):
+        """Get existing fill layer or create a new one"""
+        layers = gp_obj.data.layers
+        
+        # Check if layer already exists
+        for layer in layers:
+            if hasattr(layer, 'info') and layer.info == self.fill_layer_name:
+                return layer
+            elif hasattr(layer, 'name') and layer.name == self.fill_layer_name:
+                return layer
+        
+        # Create new layer
+        if is_gpv3():
+            new_layer = layers.new(name=self.fill_layer_name, set_active=False)
+        else:
+            new_layer = layers.new(name=self.fill_layer_name)
+        
+        return new_layer
+
+    def get_or_create_frame(self, layer, frame_number):
+        """Get existing frame or create a new one"""
+        for frame in layer.frames:
+            if frame.frame_number == frame_number:
+                return frame
+        
+        return layer.frames.new(frame_number)
 
     def modal(self, context, event):
         """Handle mouse click detection"""
@@ -154,6 +232,8 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             
             if result == {'CANCELLED'}:
                 self.report({"WARNING"}, "Click outside any closed area or fill failed")
+            else:
+                self.report({"INFO"}, "Fill created successfully")
             
             return {'FINISHED'}
         
@@ -187,8 +267,11 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             click_2d[1] * self.scale_factor
         ))
         
-        # Find which triangle was clicked
-        triangle_idx = self.find_triangle_at_point((click_2d_scaled[0], click_2d_scaled[1]))
+        # Find which triangle was clicked (with tolerance)
+        triangle_idx = self.find_triangle_at_point_with_tolerance(
+            (click_2d_scaled[0], click_2d_scaled[1]),
+            context
+        )
         
         if triangle_idx < 0:
             self.report({"WARNING"}, "Click outside any closed area")
@@ -224,8 +307,8 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         else:
             material_index = 0
         
-        # Create new stroke for the fill
-        new_stroke = self.current_frame.nijigp_strokes.new()
+        # Create new stroke in the fill frame
+        new_stroke = self.fill_frame.nijigp_strokes.new()
         new_stroke.use_cyclic = True
         new_stroke.material_index = material_index
         new_stroke.select = True
@@ -246,12 +329,11 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         new_stroke.select = True
         
         # Refresh to ensure proper display
-        refresh_strokes(self.gp_obj, [self.current_frame.frame_number])
+        refresh_strokes(self.gp_obj, [self.fill_frame.frame_number])
         
         # Restore original selection
         load_stroke_selection(self.gp_obj, self.select_map)
         
-        self.report({"INFO"}, f"Fill created with {num_points} points")
         return {'FINISHED'}
 
     def get_click_3d(self, context):
@@ -269,11 +351,8 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         coord = (self.click_x, self.click_y)
         
         # Get ray from view through mouse position
-        view_matrix_inv = rv3d.view_matrix.inverted()
-        ray_origin = view_matrix_inv.to_translation()
-        
-        # Calculate ray direction
-        from bpy_extras.view3d_utils import region_2d_to_vector_3d
+        from bpy_extras.view3d_utils import region_2d_to_vector_3d, region_2d_to_origin_3d
+        ray_origin = region_2d_to_origin_3d(region, rv3d, coord)
         ray_direction = region_2d_to_vector_3d(region, rv3d, coord)
         
         # Find closest point on Grease Pencil strokes
@@ -295,18 +374,14 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                 )
                 
                 if intersect and len(intersect) >= 2:
-                    # intersect_line_line returns a tuple of two points
-                    # The closest point on the ray to the segment is the first one
                     point_on_ray = intersect[0]
                     
                     # Check if the intersection point is within the segment bounds
-                    # by projecting onto the segment direction
                     seg_vec = p2 - p1
                     seg_len = seg_vec.length
                     if seg_len > 0:
                         t = (point_on_ray - p1).dot(seg_vec) / (seg_len * seg_len)
                         if 0 <= t <= 1:
-                            # Calculate distance from ray origin to intersection point
                             dist = (point_on_ray - ray_origin).length
                             if dist < min_distance:
                                 min_distance = dist
@@ -327,15 +402,14 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         
         return closest_point
 
-    def find_triangle_at_point(self, point_co):
+    def find_triangle_at_point_with_tolerance(self, point_co, context):
         """
-        Find the triangle index that contains the given 2D point.
-        Returns -1 if no triangle contains the point.
+        Find triangle containing point, with tolerance.
+        If exact point not in any triangle, find nearest triangle within tolerance.
         """
         import pyclipper
         
         # First, check if point is inside any polygon (closed stroke)
-        # This helps filter out clicks outside any closed area
         inside_any_polygon = False
         for poly in self.poly_list:
             if pyclipper.PointInPolygon(point_co, poly) == 1:
@@ -343,15 +417,43 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                 break
         
         if not inside_any_polygon:
-            return -1
+            # Point is outside all polygons, try to find nearby triangle with tolerance
+            return self.find_nearest_triangle(point_co, context)
         
-        # Find triangle containing the point
+        # Find exact triangle containing the point
         for i, tri in enumerate(self.tr_map['triangles']):
             poly = [self.tr_map['vertices'][v] for v in tri]
             if pyclipper.PointInPolygon(point_co, poly) == 1:
                 return i
         
-        return -1
+        # Point is inside a polygon but not in any triangle (rare)
+        # Fall back to nearest triangle
+        return self.find_nearest_triangle(point_co, context)
+
+    def find_nearest_triangle(self, point_co, context):
+        """
+        Find the triangle closest to the click point within tolerance.
+        """
+        point = Vector(point_co)
+        
+        # Convert pixel tolerance to world units (approximate)
+        # Use a more generous scaling for better user experience
+        tolerance_world = self.click_tolerance / 50.0
+        
+        # Find triangle with closest center
+        best_idx = -1
+        best_dist = float('inf')
+        
+        for i, center in enumerate(self.triangle_centers):
+            dist = (center - point).length
+            if dist < best_dist and dist < tolerance_world:
+                best_dist = dist
+                best_idx = i
+        
+        if best_idx >= 0 and best_dist > 0:
+            self.report({"INFO"}, f"Click adjusted by {best_dist:.2f} units")
+        
+        return best_idx
 
 
 def lineart_triangulation(stroke_list, t_mat, poly_list, scale_factor, resolution):
