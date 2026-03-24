@@ -10,6 +10,12 @@ from ..core import helpers
 import os
 import uuid
 
+def get_monitor_state():
+    return getattr(bpy.types.Scene, 'timeoffset_monitor_active', False)
+
+def set_monitor_state(value):
+    bpy.types.Scene.timeoffset_monitor_active = value
+
 class TIME_OFFSET_OT_create_clean_frame(Operator):
     """Cria um novo frame limpo na biblioteca (frames negativos) para TODAS as layers"""
     bl_idname = "time_offset.create_clean_frame"
@@ -1257,6 +1263,242 @@ class TIME_OFFSET_OT_remove_keyframe_timeline(Operator):
             self.report({'ERROR'}, f"Erro ao remover keyframes: {str(e)}")
             return {'CANCELLED'}
 
+class TIME_OFFSET_OT_monitor_keyframes(Operator):
+    """Monitora substituição perigosa de keyframes"""
+    bl_idname = "time_offset.monitor_keyframes"
+    bl_label = "Monitor Keyframes"
+    bl_description = "Detecta substituição de frames que podem causar crash"
+    bl_options = {'REGISTER'}
+
+    _timer = None
+    _monitoring = False
+    _last_frame_content = {}
+    _last_warning_frame = 0  # Frame do último aviso
+    _warning_cooldown = 0    # Contador de cooldown
+    _operation_in_progress = False
+
+    def _get_frame_content_map(self, obj):
+        """Mapeia quais frames têm conteúdo por layer"""
+        content_map = {}
+        
+        if not obj or not obj.data:
+            return content_map
+        
+        try:
+            for layer in obj.data.layers:
+                layer_name = layer.info if hasattr(layer, 'info') else layer.name
+                frames_with_content = set()
+                
+                for frame in layer.frames:
+                    frame_num = frame.frame_number
+                    has_content = False
+                    
+                    try:
+                        if hasattr(frame, 'nuclear_strokes'):
+                            stroke_count = 0
+                            for _ in frame.nuclear_strokes:
+                                stroke_count += 1
+                                if stroke_count > 5:  # Se tiver mais de 5 strokes, considerado conteúdo pesado
+                                    break
+                            has_content = stroke_count > 0
+                        elif hasattr(frame, 'strokes'):
+                            has_content = len(frame.strokes) > 0
+                    except:
+                        pass
+                    
+                    if has_content:
+                        frames_with_content.add(frame_num)
+                
+                content_map[layer_name] = frames_with_content
+                
+        except Exception as e:
+            print(f"DEBUG: erro no mapeamento - {e}")
+            
+        return content_map
+
+    def _detect_dangerous_operation(self, old_map, new_map):
+        """Detecta substituição perigosa de frames com conteúdo"""
+        warnings = []
+        
+        try:
+            for layer_name, new_frames in new_map.items():
+                old_frames = old_map.get(layer_name, set())
+                
+                # Frames removidos (perderam conteúdo)
+                removed = old_frames - new_frames
+                
+                # Frames adicionados (ganharam conteúdo)
+                added = new_frames - old_frames
+                
+                # Detectar movimento de conteúdo (remove um, adiciona outro)
+                if removed and added:
+                    warnings.append({
+                        'layer': layer_name,
+                        'removed': list(removed),
+                        'added': list(added),
+                        'type': 'movement'
+                    })
+                
+                # Detectar sobrescrita (frame existente perdeu e ganhou conteúdo)
+                for frame_num in old_frames.intersection(new_frames):
+                    warnings.append({
+                        'layer': layer_name,
+                        'frame': frame_num,
+                        'type': 'overwrite'
+                    })
+                        
+        except Exception as e:
+            print(f"DEBUG: erro na detecção - {e}")
+            
+        return warnings
+
+    def _show_warning(self, warnings, current_frame):
+        """Mostra aviso apenas uma vez por operação"""
+        # Cooldown: só avisa a cada 30 frames ou se passaram 2 segundos
+        if self._warning_cooldown > 0:
+            self._warning_cooldown -= 1
+            return
+            
+        if self._last_warning_frame == current_frame:
+            return  # Já avisou neste frame
+            
+        self._last_warning_frame = current_frame
+        self._warning_cooldown = 10  # Não avisar novamente por 10 ciclos (~3 segundos)
+        
+        # Construir mensagem
+        msg = f"⚠️ OPERAÇÃO PERIGOSA DETECTADA!\n\n"
+        msg += f"Movimentação de frames com conteúdo pode causar CRASH!\n\n"
+        
+        for w in warnings[:3]:
+            if w['type'] == 'movement':
+                removed_str = ', '.join(str(f) for f in w['removed'][:3])
+                added_str = ', '.join(str(f) for f in w['added'][:3])
+                msg += f"• Layer '{w['layer']}': {removed_str} → {added_str}\n"
+            elif w['type'] == 'overwrite':
+                msg += f"• Layer '{w['layer']}': Frame {w['frame']} foi sobrescrito\n"
+        
+        if len(warnings) > 3:
+            msg += f"\n• e mais {len(warnings)-3} alterações\n"
+        
+        msg += f"\n💡 RECOMENDAÇÃO:\n"
+        msg += f"• Desfaça a operação (Ctrl+Z) para evitar crash\n"
+        msg += f"• Use os operadores do addon para mover/duplicar frames\n"
+        msg += f"• Desative o monitor se precisar fazer várias operações"
+        
+        def draw(self, context):
+            layout = self.layout
+            for line in msg.split('\n'):
+                if line.startswith('⚠️'):
+                    layout.label(text=line, icon='ERROR')
+                elif line.startswith('💡'):
+                    layout.label(text=line, icon='INFO')
+                elif line == '':
+                    layout.separator()
+                else:
+                    layout.label(text=line)
+        
+        try:
+            bpy.context.window_manager.popup_menu(draw, title="⚠️ ALERTA DE SEGURANÇA", icon='ERROR')
+            self.report({'WARNING'}, "Operação perigosa detectada! Desfaça para prevenir crash.")
+        except:
+            self.report({'WARNING'}, "⚠️ Operação perigosa! Desfaça imediatamente (Ctrl+Z)")
+
+    def modal(self, context, event):
+        if not self._monitoring:
+            return {'FINISHED'}
+        
+        if event.type == 'TIMER':
+            obj = context.active_object
+            if not obj or not gp_api.obj_is_gp(obj):
+                return {'PASS_THROUGH'}
+            
+            try:
+                current_map = self._get_frame_content_map(obj)
+                current_frame = context.scene.frame_current
+                
+                # Detectar mudanças perigosas
+                if self._last_frame_content:
+                    # Verificar se houve mudança significativa
+                    if current_map != self._last_frame_content:
+                        warnings = self._detect_dangerous_operation(self._last_frame_content, current_map)
+                        
+                        if warnings and not self._operation_in_progress:
+                            self._operation_in_progress = True
+                            self._show_warning(warnings, current_frame)
+                        else:
+                            # Se não há warnings, resetar flag
+                            self._operation_in_progress = False
+                
+                self._last_frame_content = current_map
+                
+                # Decrementar cooldown
+                if self._warning_cooldown > 0:
+                    self._warning_cooldown -= 1
+                
+            except Exception as e:
+                print(f"DEBUG: erro no modal - {e}")
+                pass
+        
+        return {'PASS_THROUGH'}
+
+    def execute(self, context):
+        """Ativa/desativa o monitoramento"""
+        wm = context.window_manager
+        
+        if self._monitoring:
+            if self._timer:
+                try:
+                    wm.event_timer_remove(self._timer)
+                except:
+                    pass
+                self._timer = None
+            self._monitoring = False
+            self._last_frame_content = {}
+            self._last_warning_frame = 0
+            self._warning_cooldown = 0
+            self._operation_in_progress = False
+            bpy.types.Scene.timeoffset_monitor_active = False
+            self.report({'INFO'}, "🔒 Monitor DESATIVADO")
+            print("DEBUG: Monitor desativado")
+            return {'FINISHED'}
+        
+        obj = context.active_object
+        if not obj or not gp_api.obj_is_gp(obj):
+            self.report({'WARNING'}, "Selecione um objeto Grease Pencil")
+            return {'CANCELLED'}
+        
+        try:
+            self._timer = wm.event_timer_add(0.3, window=context.window)
+            self._last_frame_content = self._get_frame_content_map(obj)
+            self._monitoring = True
+            self._last_warning_frame = 0
+            self._warning_cooldown = 0
+            self._operation_in_progress = False
+            bpy.types.Scene.timeoffset_monitor_active = True
+            
+            wm.modal_handler_add(self)
+            self.report({'INFO'}, "🛡️ Monitor ATIVADO - alerta em operações perigosas")
+            print("DEBUG: Monitor ativado - modo proteção ativo")
+            
+        except Exception as e:
+            self.report({'ERROR'}, f"Erro ao ativar monitor: {e}")
+            return {'CANCELLED'}
+        
+        return {'RUNNING_MODAL'}
+
+    def cancel(self, context):
+        if self._timer:
+            try:
+                context.window_manager.event_timer_remove(self._timer)
+            except:
+                pass
+            self._timer = None
+        self._monitoring = False
+        self._last_frame_content = {}
+        self._last_warning_frame = 0
+        self._warning_cooldown = 0
+        self._operation_in_progress = False
+
 class TIME_OFFSET_OT_assign_all_frames(Operator):
     """Assign automático de TODOS os keyframes selecionados para o vertex group ativo"""
     bl_idname = "time_offset.assign_all_frames"
@@ -1569,6 +1811,26 @@ class TIME_OFFSET_PT_main_panel(Panel):
             row.operator("time_offset.next_keyframe", text="", icon='NEXT_KEYFRAME')
         else:
             col.operator("time_offset.animate_offset", text="Iniciar Animação", icon='KEYFRAME_HLT')
+    
+        # ============================================
+        # MONITOR DE SEGURANÇA
+        # ============================================
+        layout.separator()
+        box = layout.box()
+        box.label(text="Segurança", icon='TOOL_SETTINGS')
+        
+        # Verificar se monitor está ativo (usando propriedade global simples)
+        # Vamos usar um atributo simples no objeto para track
+        is_monitoring = getattr(context.scene, 'timeoffset_monitor_active', False)
+        
+        row = box.row(align=True)
+        if is_monitoring:
+            row.operator("time_offset.monitor_keyframes", text="Desativar Monitor", icon='TOOL_SETTINGS')
+            row.label(text="", icon='CHECKMARK')
+            box.label(text="Monitor ATIVO - detectando sobreposição", icon='INFO')
+        else:
+            row.operator("time_offset.monitor_keyframes", text="Ativar Monitor", icon='TOOL_SETTINGS')
+            box.label(text="Monitor INATIVO - risco de crash ao duplicar/mover", icon='ERROR')
 
         # ============================================
         # STATUS DA TIMELINE
@@ -1686,6 +1948,7 @@ classes = (
     TIME_OFFSET_OT_navigate_next,
     TIME_OFFSET_OT_go_to_first_library_frame,
     TIME_OFFSET_OT_animate_offset,
+    TIME_OFFSET_OT_monitor_keyframes,
     TIME_OFFSET_OT_remove_animation,
     TIME_OFFSET_OT_next_keyframe,
     TIME_OFFSET_OT_previous_keyframe,

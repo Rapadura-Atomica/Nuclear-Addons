@@ -201,7 +201,6 @@ def get_library_preview(obj, frame):
         return None
     pose_id = get_pose_id(obj, frame)  # ← Mudança aqui!
     if not pose_id:
-        print(f"❌ Frame {frame} não tem pose_id")
         return None
     preview_dir = os.path.join(
         bpy.app.tempdir,
