@@ -13,6 +13,11 @@ class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
 
+        # Botão do Balde de Tinta simplificado
+        row = layout.row()
+        row.operator("gpencil.nijigp_simple_bucket_fill", icon='SHADING_SOLID')
+        
+        # Mantém os operadores originais (opcional)
         row = layout.row()
         row.operator("gpencil.nijigp_fit_last", icon='MOD_SMOOTH')
         row = layout.row()

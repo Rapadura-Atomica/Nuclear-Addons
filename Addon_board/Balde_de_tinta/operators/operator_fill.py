@@ -371,6 +371,7 @@ class HatchFillOperator(bpy.types.Operator, ColorTintConfig, NoiseConfig):
                     ('LINE', 'All Lines', ''),
                     ('OPEN', 'All Open Lines', '')],
             default='NONE',
+            
             description='Skip strokes without fill'
     )
     output_material: bpy.props.StringProperty(
