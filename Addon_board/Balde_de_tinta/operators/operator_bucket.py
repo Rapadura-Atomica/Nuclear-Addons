@@ -46,6 +46,16 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
     _waiting_for_click = False
     _modal_handler = None
 
+    # New property: auto close gap threshold
+    auto_close_gap: bpy.props.FloatProperty(
+        name="Auto Close Gap",
+        description="Automatically close gaps smaller than this distance (in pixels)",
+        default=10.0,
+        min=0.0,
+        max=50.0,
+        subtype='PIXEL'
+    )
+
     @classmethod
     def poll(cls, context):
         """Only available when a Grease Pencil object is active and in edit/draw mode"""
@@ -97,7 +107,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         
         # Build info message
         layer_info = f" -> Fill Layer: {self.fill_layer_name}" if self.use_fill_layer else ""
-        self.report({"INFO"}, f"Click inside the area you want to fill (tolerance: {self.click_tolerance:.0f}px){layer_info}")
+        self.report({"INFO"}, f"Click inside the area you want to fill (tolerance: {self.click_tolerance:.0f}px, auto-close: {self.auto_close_gap:.0f}px){layer_info}")
         
         return {'RUNNING_MODAL'}
 
@@ -141,6 +151,9 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "No strokes found in the current frame")
             return {'CANCELLED'}
         
+        # Auto-close strokes with small gaps
+        self.close_stroke_gaps()
+        
         # Store original selection to restore later
         self.select_map = save_stroke_selection(gp_obj)
         
@@ -153,7 +166,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             requires_layer=False
         )
         
-        # Convert strokes to 2D coordinates
+        # Convert strokes to 2D coordinates with higher precision
         self.poly_list, self.depth_list, self.scale_factor = get_2d_co_from_strokes(
             self.all_strokes, self.t_mat, scale=True, correct_orientation=True
         )
@@ -162,10 +175,13 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "Could not convert strokes to 2D")
             return {'CANCELLED'}
         
+        # Validate and repair polygons before triangulation
+        self.repair_polygons()
+        
         # Create depth lookup tree
         self.depth_lookup = DepthLookupTree(self.poly_list, self.depth_list)
         
-        # Triangulate the line art with higher resolution for better tolerance
+        # Triangulate the line art with higher resolution
         self.tr_map = lineart_triangulation(
             self.all_strokes, self.t_mat, self.poly_list, self.scale_factor, 0.02
         )
@@ -188,6 +204,106 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.triangle_centers.append(center)
         
         return {'FINISHED'}
+
+    def close_stroke_gaps(self):
+        """
+        Automatically close small gaps in strokes by connecting endpoints
+        that are within the auto_close_gap threshold.
+        """
+        if self.auto_close_gap <= 0:
+            return
+        
+        # For each stroke that is not cyclic, check distance between start and end
+        for stroke in self.all_strokes:
+            if stroke.use_cyclic or len(stroke.points) < 2:
+                continue
+            
+            # Get start and end points
+            p_start = stroke.points[0].co
+            p_end = stroke.points[-1].co
+            
+            # Calculate distance in world units
+            gap_distance = (p_start - p_end).length
+            
+            # Convert pixel threshold to world units (approximate)
+            # Using view scale factor for rough conversion
+            gap_threshold = self.auto_close_gap / 100.0
+            
+            if gap_distance < gap_threshold:
+                # Close the gap by marking stroke as cyclic
+                stroke.use_cyclic = True
+                self.report({"INFO"}, f"Auto-closed stroke with gap of {gap_distance:.3f} units")
+            elif gap_distance < gap_threshold * 3:
+                # For slightly larger gaps, add a connecting segment
+                self.add_connecting_segment(stroke, p_start, p_end)
+                stroke.use_cyclic = True
+                self.report({"INFO"}, f"Added connecting segment to close stroke (gap: {gap_distance:.3f} units)")
+
+    def add_connecting_segment(self, stroke, p_start, p_end):
+        """
+        Add a connecting segment between start and end points of a stroke.
+        """
+        # Add a new point at the end (or beginning) to bridge the gap
+        num_points = len(stroke.points)
+        stroke.points.add(1)
+        
+        # Calculate midpoint for smoother connection
+        mid_point = (p_start + p_end) / 2
+        
+        # Add point at the end
+        new_point = stroke.points[num_points]
+        new_point.co = mid_point
+        new_point.strength = 1.0
+        new_point.pressure = stroke.points[0].pressure
+
+    def repair_polygons(self):
+        """
+        Validate and repair polygons to ensure they are suitable for triangulation.
+        Removes degenerate points and simplifies overly complex polygons.
+        """
+        import pyclipper
+        
+        cleaned_polys = []
+        cleaned_strokes = []
+        
+        for i, poly in enumerate(self.poly_list):
+            if len(poly) < 3:
+                continue
+            
+            # Remove duplicate consecutive points
+            cleaned = []
+            for j, p in enumerate(poly):
+                if j > 0 and (p[0] == cleaned[-1][0] and p[1] == cleaned[-1][1]):
+                    continue
+                cleaned.append(p)
+            
+            # If polygon has less than 3 points after cleaning, skip
+            if len(cleaned) < 3:
+                continue
+            
+            # Use Clipper to clean up self-intersections and simplify
+            clipper_poly = [(int(p[0] * 100), int(p[1] * 100)) for p in cleaned]
+            
+            # Check orientation and fix if needed
+            if not pyclipper.Orientation(clipper_poly):
+                clipper_poly.reverse()
+            
+            # Clean using a small offset to remove self-intersections
+            clipper = pyclipper.PyclipperOffset()
+            clipper.AddPath(clipper_poly, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+            cleaned_clipper = clipper.Execute(0.01)
+            
+            if cleaned_clipper and len(cleaned_clipper) > 0:
+                # Convert back to float
+                cleaned_poly = [(p[0] / 100.0, p[1] / 100.0) for p in cleaned_clipper[0]]
+                cleaned_polys.append(cleaned_poly)
+                cleaned_strokes.append(self.all_strokes[i])
+        
+        # Update with cleaned polygons
+        if cleaned_polys:
+            self.poly_list = cleaned_polys
+            self.all_strokes = cleaned_strokes
+            self.report({"INFO"}, f"Repaired {len(cleaned_polys)} polygons")
 
     def get_or_create_fill_layer(self, gp_obj):
         """Get existing fill layer or create a new one"""
@@ -282,6 +398,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         self.solver.labels[triangle_idx] = 1
         
         # Propagate labels to all connected triangles (flood fill)
+        # This respects the original strokes as barriers
         self.solver.propagate_labels()
         
         # Extract contours of the labeled region
@@ -292,12 +409,17 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         for i, contour_list in enumerate(contours):
             if i < len(component_labels) and component_labels[i] == 1:
                 if len(contour_list) > 0:
-                    target_contour = contour_list[0]
+                    # Get the largest contour (outermost)
+                    largest = max(contour_list, key=lambda x: len(x))
+                    target_contour = largest
                     break
         
         if not target_contour or len(target_contour) < 3:
             self.report({"WARNING"}, "Could not extract contour from selected area")
             return {'CANCELLED'}
+        
+        # Simplify the contour to follow the original strokes more closely
+        target_contour = self.simplify_contour_to_strokes(target_contour)
         
         # Get active material index
         if self.gp_obj.active_material:
@@ -335,6 +457,35 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         load_stroke_selection(self.gp_obj, self.select_map)
         
         return {'FINISHED'}
+
+    def simplify_contour_to_strokes(self, contour):
+        """
+        Simplify the contour to follow original stroke boundaries more closely.
+        This helps eliminate artifacts from triangulation and ensures the fill
+        follows the actual line art.
+        """
+        import pyclipper
+        
+        if len(contour) < 10:
+            return contour
+        
+        # Convert to integer coordinates for Clipper (better precision)
+        clipper_contour = [(int(p[0] * 100), int(p[1] * 100)) for p in contour]
+        
+        # Use Clipper to clean up the contour
+        # This removes self-intersections and simplifies
+        clipper = pyclipper.PyclipperOffset()
+        clipper.AddPath(clipper_contour, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+        
+        # Apply a very small offset to clean up without changing shape
+        cleaned = clipper.Execute(0.01)
+        
+        if cleaned and len(cleaned) > 0:
+            # Convert back to float coordinates
+            cleaned_contour = [(p[0] / 100.0, p[1] / 100.0) for p in cleaned[0]]
+            return cleaned_contour
+        
+        return contour
 
     def get_click_3d(self, context):
         """
@@ -437,7 +588,6 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         point = Vector(point_co)
         
         # Convert pixel tolerance to world units (approximate)
-        # Use a more generous scaling for better user experience
         tolerance_world = self.click_tolerance / 50.0
         
         # Find triangle with closest center

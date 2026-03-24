@@ -1,6 +1,10 @@
 import bpy
 from .api_router import *
 
+# Constant for addon name
+ADDON_NAME = "Balde_de_tinta"
+
+
 class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
     bl_idname = 'NIJIGP_PT_draw_panel_line'
     bl_label = "Balde de tinta"
@@ -12,7 +16,12 @@ class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        prefs = context.preferences.addons[__package__].preferences
+        
+        # Get preferences
+        try:
+            prefs = context.preferences.addons[ADDON_NAME].preferences
+        except KeyError:
+            prefs = None
 
         # Bucket Fill Tool
         box = layout.box()
@@ -22,17 +31,24 @@ class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
         row = box.row()
         row.operator("gpencil.nijigp_simple_bucket_fill", text="Fill", icon='SHADING_SOLID')
         
-        # Tolerance slider
-        row = box.row()
-        row.prop(prefs, "bucket_fill_tolerance", text="Tolerance (px)")
-        
-        # Fill layer option
-        row = box.row()
-        row.prop(prefs, "bucket_fill_use_fill_layer", text="Use Fill Layer")
-        
-        if prefs.bucket_fill_use_fill_layer:
+        # Tolerance slider (only if preferences available)
+        if prefs:
             row = box.row()
-            row.prop(prefs, "bucket_fill_layer_name", text="Fill Layer")
+            row.prop(prefs, "bucket_fill_tolerance", text="Tolerance (px)")
+            
+            # Auto-close gap slider
+            row = box.row()
+            row.prop(prefs, "bucket_fill_auto_close_gap", text="Auto-Close Gap (px)")
+            
+            # Fill layer option
+            row = box.row()
+            row.prop(prefs, "bucket_fill_use_fill_layer", text="Use Fill Layer")
+            
+            if prefs.bucket_fill_use_fill_layer:
+                row = box.row()
+                row.prop(prefs, "bucket_fill_layer_name", text="Fill Layer")
+        else:
+            box.label(text="Preferences not available", icon='ERROR')
         
         # Separator
         layout.separator()
