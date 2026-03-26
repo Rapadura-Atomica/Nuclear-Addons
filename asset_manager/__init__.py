@@ -22,6 +22,17 @@ from bpy.props import StringProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper
 from bpy.app.handlers import persistent
 
+from .grease_pencil_operators import (
+    GP_OT_add_current_to_library,
+    GP_OT_apply_pose,
+    GP_OT_refresh_library,
+    GP_OT_delete_pose
+)
+from .grease_pencil_ui import (
+    GP_PT_library_panel,
+    GP_PT_library_settings
+)
+
 # ===========================================================================
 # CONFIGURAÇÕES
 # ===========================================================================
@@ -460,6 +471,12 @@ classes = (
     ASSETMANAGER_OT_import_animatic,
     ASSETMANAGER_OT_duplicate_project,
     ASSETMANAGER_PT_main,
+    GP_OT_add_current_to_library,
+    GP_OT_apply_pose,
+    GP_OT_refresh_library,
+    GP_OT_delete_pose,
+    GP_PT_library_panel,
+    GP_PT_library_settings,
 )
 
 def register():
