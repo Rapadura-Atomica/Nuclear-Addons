@@ -5,7 +5,7 @@
 #
 # This program is distributed in the hope that it will be useful, but
 # WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTIBILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU
 # General Public License for more details.
 #
 # You should have received a copy of the GNU General Public License
@@ -15,6 +15,7 @@ import bpy
 import numpy as np
 from mathutils import *
 from mathutils.geometry import intersect_line_plane, intersect_line_line
+import time
 
 # Import from addon modules
 from ..utils import *
@@ -32,7 +33,6 @@ from .common import (
 from ..solvers.graph import SmartFillSolver
 
 
-# Constant for addon name
 ADDON_NAME = "Balde_de_tinta"
 
 
@@ -44,75 +44,72 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     _waiting_for_click = False
-    _modal_handler = None
-
-    # New property: auto close gap threshold
-    auto_close_gap: bpy.props.FloatProperty(
-        name="Auto Close Gap",
-        description="Automatically close gaps smaller than this distance (in pixels)",
-        default=10.0,
-        min=0.0,
-        max=50.0,
-        subtype='PIXEL'
-    )
 
     @classmethod
     def poll(cls, context):
-        """Only available when a Grease Pencil object is active and in edit/draw mode"""
         if not context.object or not obj_is_gp(context.object):
             return False
         return context.mode in {'EDIT_GPENCIL', 'PAINT_GPENCIL', 'EDIT_GREASE_PENCIL', 'PAINT_GREASE_PENCIL'}
 
     def get_preferences(self, context):
-        """Get addon preferences safely"""
         try:
-            return context.preferences.addons[ADDON_NAME].preferences
+            prefs = context.preferences.addons[ADDON_NAME].preferences
+            if not hasattr(prefs, 'bucket_fill_tolerance'):
+                prefs.bucket_fill_tolerance = 20.0
+            if not hasattr(prefs, 'bucket_fill_auto_close_gap'):
+                prefs.bucket_fill_auto_close_gap = 30.0
+            if not hasattr(prefs, 'bucket_fill_use_fill_layer'):
+                prefs.bucket_fill_use_fill_layer = True
+            if not hasattr(prefs, 'bucket_fill_layer_name'):
+                prefs.bucket_fill_layer_name = "Fills"
+            if not hasattr(prefs, 'bucket_fill_use_simplification'):
+                prefs.bucket_fill_use_simplification = True
+            if not hasattr(prefs, 'bucket_fill_max_points'):
+                prefs.bucket_fill_max_points = 200
+            return prefs
         except KeyError:
             return None
 
     def invoke(self, context, event):
-        """Activate modal mode to wait for click"""
-        if context.area:
-            context.area.tag_redraw()
+        start_time = time.time()
         
-        # Get preferences for bucket fill settings
         prefs = self.get_preferences(context)
         
         if prefs:
             self.click_tolerance = prefs.bucket_fill_tolerance
             self.use_fill_layer = prefs.bucket_fill_use_fill_layer
             self.fill_layer_name = prefs.bucket_fill_layer_name
+            self.auto_close_gap = prefs.bucket_fill_auto_close_gap
+            self.use_simplification = prefs.bucket_fill_use_simplification
+            self.max_points = prefs.bucket_fill_max_points
         else:
-            # Default values if preferences not available
-            self.click_tolerance = 15.0
+            self.click_tolerance = 20.0
             self.use_fill_layer = True
             self.fill_layer_name = "Fills"
+            self.auto_close_gap = 30.0
+            self.use_simplification = True
+            self.max_points = 200
         
-        # Store the current object and mode
         self.gp_obj = context.object
         self.original_mode = context.mode
+        self.current_frame_number = context.scene.frame_current  # Armazena frame atual
         
-        # Store transformation matrix and strokes before modal
         result = self.prepare_data(context)
         if result == {'CANCELLED'}:
             return {'CANCELLED'}
         
-        # Add modal handler
         context.window_manager.modal_handler_add(self)
-        
-        # Change cursor to indicate waiting for click
         context.window.cursor_modal_set('EYEDROPPER')
         
         self._waiting_for_click = True
         
-        # Build info message
-        layer_info = f" -> Fill Layer: {self.fill_layer_name}" if self.use_fill_layer else ""
-        self.report({"INFO"}, f"Click inside the area you want to fill (tolerance: {self.click_tolerance:.0f}px, auto-close: {self.auto_close_gap:.0f}px){layer_info}")
+        elapsed = time.time() - start_time
+        self.report({"INFO"}, f"Ready ({elapsed:.1f}s) - {len(self.all_strokes)} strokes")
         
         return {'RUNNING_MODAL'}
 
     def prepare_data(self, context):
-        """Pre-compute transformation and triangulation before modal"""
+        """Pre-compute transformation and triangulation - OTIMIZADO"""
         gp_obj = self.gp_obj
         active_layer = gp_obj.data.layers.active
         
@@ -120,44 +117,42 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "No active layer found")
             return {'CANCELLED'}
         
-        # Get or create fill layer if needed
+        # Get or create fill layer
         if self.use_fill_layer:
             self.fill_layer = self.get_or_create_fill_layer(gp_obj)
-            if not self.fill_layer:
-                self.report({"WARNING"}, f"Could not create fill layer: {self.fill_layer_name}")
-                return {'CANCELLED'}
         else:
             self.fill_layer = active_layer
         
-        # Get current frame
+        # IMPORTANTE: USAR APENAS O FRAME ATUAL, não todos os keyframes
         if is_gpv3():
             self.current_frame = active_layer.active_frame
         else:
             self.current_frame = active_layer.active_frame
         
         if not self.current_frame:
-            self.current_frame = active_layer.frames.new(context.scene.frame_current)
+            self.current_frame = active_layer.frames.new(self.current_frame_number)
         
-        # Get fill frame (same frame number as current frame)
+        # Garantir que o fill frame está no mesmo número de frame
         if self.use_fill_layer:
-            self.fill_frame = self.get_or_create_frame(self.fill_layer, self.current_frame.frame_number)
+            self.fill_frame = self.get_or_create_frame(self.fill_layer, self.current_frame_number)
         else:
             self.fill_frame = self.current_frame
         
-        # Get all strokes from the active layer (these are the boundaries)
+        # Get all strokes do frame atual APENAS
         self.all_strokes = get_input_strokes(gp_obj, self.current_frame, select_all=True)
         
         if len(self.all_strokes) < 1:
-            self.report({"WARNING"}, "No strokes found in the current frame")
+            self.report({"WARNING"}, "No strokes found")
             return {'CANCELLED'}
         
-        # Auto-close strokes with small gaps
-        self.close_stroke_gaps()
+        # Simplify strokes if needed
+        if self.use_simplification and self.max_points > 0:
+            self.simplify_strokes()
         
-        # Store original selection to restore later
+        # Store original selection
         self.select_map = save_stroke_selection(gp_obj)
         
-        # Get transformation matrix for 2D projection
+        # Get transformation matrix
         self.t_mat, self.inv_mat = get_transformation_mat(
             mode=context.scene.nijigp_working_plane,
             gp_obj=gp_obj,
@@ -166,35 +161,37 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             requires_layer=False
         )
         
-        # Convert strokes to 2D coordinates with higher precision
-        self.poly_list, self.depth_list, self.scale_factor = get_2d_co_from_strokes(
-            self.all_strokes, self.t_mat, scale=True, correct_orientation=True
-        )
+        # Convert strokes to 2D with guides
+        self.poly_list, self.depth_list, self.scale_factor, self.guide_count = \
+            self.get_2d_co_with_guides(self.all_strokes, self.t_mat)
         
         if len(self.poly_list) < 1:
             self.report({"WARNING"}, "Could not convert strokes to 2D")
             return {'CANCELLED'}
         
-        # Validate and repair polygons before triangulation
-        self.repair_polygons()
+        # Align lists
+        self.align_poly_and_depth_lists()
         
-        # Create depth lookup tree
-        self.depth_lookup = DepthLookupTree(self.poly_list, self.depth_list)
+        # Create depth lookup
+        try:
+            self.depth_lookup = self.create_safe_depth_lookup()
+        except Exception as e:
+            self.report({"WARNING"}, f"Depth lookup failed: {str(e)}")
+            return {'CANCELLED'}
         
-        # Triangulate the line art with higher resolution
-        self.tr_map = lineart_triangulation(
-            self.all_strokes, self.t_mat, self.poly_list, self.scale_factor, 0.02
-        )
+        # Triangulate
+        self.tr_map = self.triangulate_optimized()
         
-        if len(self.tr_map['triangles']) < 1:
+        self.triangle_count = len(self.tr_map.get('triangles', []))
+        if self.triangle_count < 1:
             self.report({"WARNING"}, "Triangulation failed")
             return {'CANCELLED'}
         
-        # Build graph from triangulation
+        # Build graph
         self.solver = SmartFillSolver()
         self.solver.build_graph(self.tr_map)
         
-        # Precompute triangle centers for distance-based fallback
+        # Precompute triangle centers (2D) para busca rápida
         self.triangle_centers = []
         for tri in self.tr_map['triangles']:
             v0 = Vector(self.tr_map['vertices'][tri[0]])
@@ -203,225 +200,362 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             center = (v0 + v1 + v2) / 3
             self.triangle_centers.append(center)
         
+        # KDTree para busca rápida de triângulo
+        self.triangle_kdtree = kdtree.KDTree(len(self.triangle_centers))
+        for i, center in enumerate(self.triangle_centers):
+            self.triangle_kdtree.insert(Vector((center.x, center.y, 0.0)), i)
+        self.triangle_kdtree.balance()
+        
         return {'FINISHED'}
 
-    def close_stroke_gaps(self):
-        """
-        Automatically close small gaps in strokes by connecting endpoints
-        that are within the auto_close_gap threshold.
-        """
-        if self.auto_close_gap <= 0:
-            return
-        
-        # For each stroke that is not cyclic, check distance between start and end
-        for stroke in self.all_strokes:
-            if stroke.use_cyclic or len(stroke.points) < 2:
-                continue
-            
-            # Get start and end points
-            p_start = stroke.points[0].co
-            p_end = stroke.points[-1].co
-            
-            # Calculate distance in world units
-            gap_distance = (p_start - p_end).length
-            
-            # Convert pixel threshold to world units (approximate)
-            # Using view scale factor for rough conversion
-            gap_threshold = self.auto_close_gap / 100.0
-            
-            if gap_distance < gap_threshold:
-                # Close the gap by marking stroke as cyclic
-                stroke.use_cyclic = True
-                self.report({"INFO"}, f"Auto-closed stroke with gap of {gap_distance:.3f} units")
-            elif gap_distance < gap_threshold * 3:
-                # For slightly larger gaps, add a connecting segment
-                self.add_connecting_segment(stroke, p_start, p_end)
-                stroke.use_cyclic = True
-                self.report({"INFO"}, f"Added connecting segment to close stroke (gap: {gap_distance:.3f} units)")
-
-    def add_connecting_segment(self, stroke, p_start, p_end):
-        """
-        Add a connecting segment between start and end points of a stroke.
-        """
-        # Add a new point at the end (or beginning) to bridge the gap
-        num_points = len(stroke.points)
-        stroke.points.add(1)
-        
-        # Calculate midpoint for smoother connection
-        mid_point = (p_start + p_end) / 2
-        
-        # Add point at the end
-        new_point = stroke.points[num_points]
-        new_point.co = mid_point
-        new_point.strength = 1.0
-        new_point.pressure = stroke.points[0].pressure
-
-    def repair_polygons(self):
-        """
-        Validate and repair polygons to ensure they are suitable for triangulation.
-        Removes degenerate points and simplifies overly complex polygons.
-        """
+    def get_2d_co_with_guides(self, strokes, t_mat):
+        """Convert strokes to 2D and generate guide lines - OTIMIZADO"""
         import pyclipper
         
-        cleaned_polys = []
-        cleaned_strokes = []
+        poly_list = []
+        depth_list = []
+        guide_count = 0
         
-        for i, poly in enumerate(self.poly_list):
-            if len(poly) < 3:
+        # Primeira passada: converter strokes
+        for stroke in strokes:
+            if len(stroke.points) < 2:
                 continue
             
-            # Remove duplicate consecutive points
-            cleaned = []
-            for j, p in enumerate(poly):
-                if j > 0 and (p[0] == cleaned[-1][0] and p[1] == cleaned[-1][1]):
-                    continue
-                cleaned.append(p)
+            co_list = []
+            depth_vals = []
             
-            # If polygon has less than 3 points after cleaning, skip
-            if len(cleaned) < 3:
-                continue
+            for point in stroke.points:
+                transformed_co = t_mat @ point.co
+                co_list.append([transformed_co[0], transformed_co[1]])
+                depth_vals.append(transformed_co[2])
             
-            # Use Clipper to clean up self-intersections and simplify
-            clipper_poly = [(int(p[0] * 100), int(p[1] * 100)) for p in cleaned]
-            
-            # Check orientation and fix if needed
-            if not pyclipper.Orientation(clipper_poly):
-                clipper_poly.reverse()
-            
-            # Clean using a small offset to remove self-intersections
-            clipper = pyclipper.PyclipperOffset()
-            clipper.AddPath(clipper_poly, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
-            cleaned_clipper = clipper.Execute(0.01)
-            
-            if cleaned_clipper and len(cleaned_clipper) > 0:
-                # Convert back to float
-                cleaned_poly = [(p[0] / 100.0, p[1] / 100.0) for p in cleaned_clipper[0]]
-                cleaned_polys.append(cleaned_poly)
-                cleaned_strokes.append(self.all_strokes[i])
+            poly_list.append(co_list)
+            depth_list.append(depth_vals)
         
-        # Update with cleaned polygons
-        if cleaned_polys:
-            self.poly_list = cleaned_polys
-            self.all_strokes = cleaned_strokes
-            self.report({"INFO"}, f"Repaired {len(cleaned_polys)} polygons")
-
-    def get_or_create_fill_layer(self, gp_obj):
-        """Get existing fill layer or create a new one"""
-        layers = gp_obj.data.layers
-        
-        # Check if layer already exists
-        for layer in layers:
-            if hasattr(layer, 'info') and layer.info == self.fill_layer_name:
-                return layer
-            elif hasattr(layer, 'name') and layer.name == self.fill_layer_name:
-                return layer
-        
-        # Create new layer
-        if is_gpv3():
-            new_layer = layers.new(name=self.fill_layer_name, set_active=False)
-        else:
-            new_layer = layers.new(name=self.fill_layer_name)
-        
-        return new_layer
-
-    def get_or_create_frame(self, layer, frame_number):
-        """Get existing frame or create a new one"""
-        for frame in layer.frames:
-            if frame.frame_number == frame_number:
-                return frame
-        
-        return layer.frames.new(frame_number)
-
-    def modal(self, context, event):
-        """Handle mouse click detection"""
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and self._waiting_for_click:
-            # Mouse click detected
-            self._waiting_for_click = False
-            context.window.cursor_modal_restore()
-            
-            # Get click position
-            self.click_x = event.mouse_region_x
-            self.click_y = event.mouse_region_y
-            
-            # Execute fill at click position
-            result = self.fill_at_click(context)
-            
-            if result == {'CANCELLED'}:
-                self.report({"WARNING"}, "Click outside any closed area or fill failed")
+        # Scale factor
+        if len(poly_list) > 0:
+            all_coords = [co for poly in poly_list for co in poly]
+            if all_coords:
+                xs = [c[0] for c in all_coords]
+                ys = [c[1] for c in all_coords]
+                w = max(xs) - min(xs)
+                h = max(ys) - min(ys)
+                scale_factor = 8192 / min(w, h, 8192) if w > 0 and h > 0 else 1.0
+                
+                for poly in poly_list:
+                    for co in poly:
+                        co[0] *= scale_factor
+                        co[1] *= scale_factor
             else:
-                self.report({"INFO"}, "Fill created successfully")
+                scale_factor = 1.0
+        else:
+            scale_factor = 1.0
+        
+        # Guias para fechar gaps (apenas se necessário)
+        if self.auto_close_gap > 0 and len(poly_list) > 0:
+            gap_threshold = self.auto_close_gap / 25.0 * scale_factor
             
-            return {'FINISHED'}
+            # Coletar endpoints
+            endpoints = []
+            for i, poly in enumerate(poly_list):
+                if len(poly) >= 2:
+                    endpoints.append((poly[0], i))
+                    endpoints.append((poly[-1], i))
+            
+            # Criar conexões entre endpoints próximos
+            used = set()
+            connections = 0
+            
+            for a_idx, (point_a, poly_a) in enumerate(endpoints):
+                if a_idx in used:
+                    continue
+                
+                best_idx = -1
+                best_dist = float('inf')
+                best_point = None
+                
+                for b_idx, (point_b, poly_b) in enumerate(endpoints):
+                    if a_idx == b_idx or b_idx in used or poly_a == poly_b:
+                        continue
+                    
+                    dx = point_a[0] - point_b[0]
+                    dy = point_a[1] - point_b[1]
+                    dist = (dx*dx + dy*dy) ** 0.5
+                    
+                    if dist < best_dist and dist < gap_threshold:
+                        best_dist = dist
+                        best_idx = b_idx
+                        best_point = point_b
+                
+                if best_idx >= 0 and best_point:
+                    poly_list.append([point_a, best_point])
+                    depth_list.append([0, 0])
+                    guide_count += 1
+                    connections += 1
+                    used.add(a_idx)
+                    used.add(b_idx)
         
-        elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
-            # Cancel operation
-            self._waiting_for_click = False
-            context.window.cursor_modal_restore()
-            self.report({"INFO"}, "Bucket fill cancelled")
-            return {'CANCELLED'}
+        return poly_list, depth_list, scale_factor, guide_count
+
+    def triangulate_optimized(self):
+        """Triangulação rápida e otimizada"""
+        all_coords = [co for poly in self.poly_list for co in poly]
+        if not all_coords:
+            return {'vertices': [], 'segments': [], 'triangles': [], 'orig_edges': []}
         
-        # Redraw to keep UI responsive
-        if context.area:
-            context.area.tag_redraw()
+        xs = [c[0] for c in all_coords]
+        ys = [c[1] for c in all_coords]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
         
-        return {'RUNNING_MODAL'}
+        # Margem menor para melhor performance
+        expand = max(max_x - min_x, max_y - min_y) * 0.2
+        min_x -= expand
+        max_x += expand
+        min_y -= expand
+        max_y += expand
+        
+        co_idx = {}
+        tr_input = dict(vertices=[], segments=[])
+        
+        # Adicionar segmentos das polilinhas
+        for co_list in self.poly_list:
+            if len(co_list) < 2:
+                continue
+            
+            prev_key = None
+            for j, co in enumerate(co_list):
+                key = (int(co[0] * 0.05), int(co[1] * 0.05))
+                if key not in co_idx:
+                    co_idx[key] = len(co_idx)
+                    tr_input['vertices'].append(tuple(co))
+                
+                if j > 0 and prev_key is not None:
+                    tr_input['segments'].append((prev_key, co_idx[key]))
+                
+                prev_key = co_idx[key]
+        
+        # Adicionar pontos de borda (menos para performance)
+        for x in [min_x, max_x]:
+            for y in [min_y, max_y]:
+                key = (int(x * 0.05), int(y * 0.05))
+                if key not in co_idx:
+                    co_idx[key] = len(co_idx)
+                    tr_input['vertices'].append((x, y))
+        
+        try:
+            tr_output = {}
+            tr_output['vertices'], tr_output['segments'], tr_output['triangles'], _, tr_output['orig_edges'], _ = \
+                geometry.delaunay_2d_cdt(tr_input['vertices'], tr_input['segments'], [], 0, 1e-6)
+            return tr_output
+        except Exception as e:
+            self.report({"WARNING"}, f"Triangulation error: {str(e)}")
+            return {'vertices': [], 'segments': [], 'triangles': [], 'orig_edges': []}
+
+    def extract_boundary_contour(self, labels):
+        """Extrai contorno da região rotulada - mais preciso"""
+        triangles = self.tr_map['triangles']
+        vertices = self.tr_map['vertices']
+        
+        # Mapear arestas para triângulos
+        edge_to_tris = {}
+        for t_idx, tri in enumerate(triangles):
+            for i in range(3):
+                v1 = tri[i]
+                v2 = tri[(i + 1) % 3]
+                key = (min(v1, v2), max(v1, v2))
+                if key not in edge_to_tris:
+                    edge_to_tris[key] = []
+                edge_to_tris[key].append(t_idx)
+        
+        # Coletar arestas de fronteira
+        boundary_edges = []
+        for key, tris in edge_to_tris.items():
+            if len(tris) == 1:
+                if labels[tris[0]] == 1:
+                    boundary_edges.append(key)
+            elif len(tris) == 2:
+                t1, t2 = tris
+                if (labels[t1] == 1) != (labels[t2] == 1):
+                    boundary_edges.append(key)
+        
+        if not boundary_edges:
+            return None
+        
+        # Construir grafo de arestas
+        graph = {}
+        for a, b in boundary_edges:
+            graph.setdefault(a, []).append(b)
+            graph.setdefault(b, []).append(a)
+        
+        # Encontrar ponto inicial
+        start = None
+        for v, neighbors in graph.items():
+            if len(neighbors) == 1:
+                start = v
+                break
+        if start is None:
+            start = next(iter(graph.keys()))
+        
+        # Caminhar pelo contorno
+        contour = []
+        current = start
+        prev = None
+        
+        while True:
+            contour.append(current)
+            neighbors = graph.get(current, [])
+            
+            # Escolher próximo ponto
+            next_v = None
+            for n in neighbors:
+                if n != prev:
+                    next_v = n
+                    break
+            
+            if next_v is None or next_v == start:
+                break
+            
+            prev = current
+            current = next_v
+        
+        if len(contour) < 3:
+            return None
+        
+        # Converter para coordenadas 2D
+        return [vertices[v] for v in contour]
+
+    def find_triangle_exact(self, point_co):
+        """Encontra triângulo que contém o ponto - com pequena tolerância"""
+        import pyclipper
+        
+        point = (point_co[0], point_co[1])
+        
+        # Busca otimizada: testar triângulos próximos primeiro
+        # IMPORTANTE: KDTree espera vetor 3D, então criamos um Vector 3D
+        search_center = Vector((point_co[0], point_co[1], 0.0))
+        
+        # Verificar se temos KDTree
+        if hasattr(self, 'triangle_kdtree') and self.triangle_kdtree:
+            nearest = self.triangle_kdtree.find_n(search_center, 20)
+            
+            for _, idx, _ in nearest:
+                if idx < len(self.tr_map['triangles']):
+                    tri = self.tr_map['triangles'][idx]
+                    poly = [self.tr_map['vertices'][v] for v in tri]
+                    if pyclipper.PointInPolygon(point, poly) == 1:
+                        return idx
+                    
+                    # Testar com pequena tolerância (ajuda em bordas)
+                    for offset in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5)]:
+                        test_pt = (point[0] + offset[0], point[1] + offset[1])
+                        if pyclipper.PointInPolygon(test_pt, poly) == 1:
+                            return idx
+        
+        # Fallback: busca linear em todos os triângulos
+        for i, tri in enumerate(self.tr_map['triangles']):
+            poly = [self.tr_map['vertices'][v] for v in tri]
+            if pyclipper.PointInPolygon(point, poly) == 1:
+                return i
+        
+        return -1
+
+    def find_nearest_triangle(self, point_co):
+        """Encontra triângulo mais próximo (fallback)"""
+        # IMPORTANTE: KDTree espera vetor 3D
+        point = Vector((point_co[0], point_co[1], 0.0))
+        tolerance = self.click_tolerance * 2.0
+        
+        if hasattr(self, 'triangle_kdtree') and self.triangle_kdtree:
+            nearest = self.triangle_kdtree.find_n(point, 10)
+            
+            for co, idx, dist in nearest:
+                if dist < tolerance:
+                    return idx
+        
+        # Fallback: busca linear com distância
+        best_idx = -1
+        best_dist = float('inf')
+        point_2d = Vector((point_co[0], point_co[1]))
+        
+        for i, center in enumerate(self.triangle_centers):
+            dist = (center - point_2d).length
+            if dist < best_dist and dist < tolerance:
+                best_dist = dist
+                best_idx = i
+        
+        return best_idx
+
+    def simplify_contour(self, contour, target_points=100):
+        """Simplifica contorno para melhor performance e qualidade"""
+        if len(contour) <= target_points:
+            return contour
+        
+        # Amostragem uniforme
+        step = len(contour) / target_points
+        simplified = []
+        for i in range(target_points):
+            idx = int(i * step)
+            if idx < len(contour):
+                simplified.append(contour[idx])
+        
+        return simplified
 
     def fill_at_click(self, context):
-        """Execute fill at the stored click position"""
+        """Executa o preenchimento no clique"""
         
-        # Get click position in 3D using raycast
         click_3d = self.get_click_3d(context)
-        
         if click_3d is None:
-            self.report({"WARNING"}, "Could not determine click position in 3D")
+            self.report({"WARNING"}, "Could not determine click position")
             return {'CANCELLED'}
         
-        # Convert to 2D coordinates
         click_2d = self.t_mat @ click_3d
-        click_2d_scaled = Vector((
+        click_2d_scaled = (
             click_2d[0] * self.scale_factor,
             click_2d[1] * self.scale_factor
-        ))
-        
-        # Find which triangle was clicked (with tolerance)
-        triangle_idx = self.find_triangle_at_point_with_tolerance(
-            (click_2d_scaled[0], click_2d_scaled[1]),
-            context
         )
         
+        # Encontrar triângulo do clique
+        triangle_idx = self.find_triangle_exact(click_2d_scaled)
+        
         if triangle_idx < 0:
-            self.report({"WARNING"}, "Click outside any closed area")
+            triangle_idx = self.find_nearest_triangle(click_2d_scaled)
+        
+        if triangle_idx < 0:
+            self.report({"WARNING"}, "No triangle found at click position")
             return {'CANCELLED'}
         
-        # Initialize labels: only the clicked triangle gets label 1
+        # Propagar labels
         self.solver.labels = -np.ones(len(self.tr_map['triangles']), dtype=np.int32)
         self.solver.labels[triangle_idx] = 1
-        
-        # Propagate labels to all connected triangles (flood fill)
-        # This respects the original strokes as barriers
         self.solver.propagate_labels()
         
-        # Extract contours of the labeled region
-        contours, component_labels = self.solver.get_contours()
+        labeled_count = np.sum(self.solver.labels == 1)
         
-        # Find the contour corresponding to label 1
-        target_contour = None
-        for i, contour_list in enumerate(contours):
-            if i < len(component_labels) and component_labels[i] == 1:
-                if len(contour_list) > 0:
-                    # Get the largest contour (outermost)
-                    largest = max(contour_list, key=lambda x: len(x))
-                    target_contour = largest
-                    break
-        
-        if not target_contour or len(target_contour) < 3:
-            self.report({"WARNING"}, "Could not extract contour from selected area")
+        if labeled_count < 2:
+            self.report({"WARNING"}, "Region too small")
             return {'CANCELLED'}
         
-        # Simplify the contour to follow the original strokes more closely
-        target_contour = self.simplify_contour_to_strokes(target_contour)
+        # Extrair contorno
+        target_contour = self.extract_boundary_contour(self.solver.labels)
         
-        # Get active material index
+        if not target_contour or len(target_contour) < 3:
+            # Fallback: método do SmartFillSolver
+            contours, component_labels = self.solver.get_contours()
+            for i, contour_list in enumerate(contours):
+                if i < len(component_labels) and component_labels[i] == 1:
+                    if len(contour_list) > 0:
+                        target_contour = max(contour_list, key=lambda x: len(x))
+                        break
+        
+        if not target_contour or len(target_contour) < 3:
+            self.report({"WARNING"}, "Could not extract contour")
+            return {'CANCELLED'}
+        
+        # Simplificar contorno para qualidade
+        target_contour = self.simplify_contour(target_contour, 200)
+        
+        # Material
         if self.gp_obj.active_material:
             material_index = self.gp_obj.material_slots.find(self.gp_obj.active_material.name)
             if material_index < 0:
@@ -429,84 +563,171 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         else:
             material_index = 0
         
-        # Create new stroke in the fill frame
+        # Criar stroke de preenchimento
         new_stroke = self.fill_frame.nijigp_strokes.new()
         new_stroke.use_cyclic = True
         new_stroke.material_index = material_index
         new_stroke.select = True
         
-        # Add points to the stroke
         num_points = len(target_contour)
         new_stroke.points.add(num_points)
         
-        # Restore 3D coordinates for each point
+        # Restaurar coordenadas 3D
         for i, co_2d in enumerate(target_contour):
-            depth = self.depth_lookup.get_depth(co_2d)
-            co_3d = restore_3d_co(co_2d, depth, self.inv_mat, self.scale_factor)
-            new_stroke.points[i].co = co_3d
-            new_stroke.points[i].strength = 1.0
+            try:
+                depth = self.depth_lookup.get_depth(co_2d)
+                co_3d = restore_3d_co(co_2d, depth, self.inv_mat, self.scale_factor)
+                new_stroke.points[i].co = co_3d
+                new_stroke.points[i].strength = 1.0
+            except:
+                # Fallback: usar profundidade do clique
+                co_3d = restore_3d_co(co_2d, click_2d[2], self.inv_mat, self.scale_factor)
+                new_stroke.points[i].co = co_3d
+                new_stroke.points[i].strength = 1.0
         
-        # Deselect all other strokes and select only the new one
+        # Limpar seleção e restaurar
         op_deselect()
         new_stroke.select = True
-        
-        # Refresh to ensure proper display
         refresh_strokes(self.gp_obj, [self.fill_frame.frame_number])
-        
-        # Restore original selection
         load_stroke_selection(self.gp_obj, self.select_map)
         
+        self.report({"INFO"}, f"Fill created with {num_points} points")
         return {'FINISHED'}
 
-    def simplify_contour_to_strokes(self, contour):
-        """
-        Simplify the contour to follow original stroke boundaries more closely.
-        This helps eliminate artifacts from triangulation and ensures the fill
-        follows the actual line art.
-        """
-        import pyclipper
+    # ====================== FUNÇÕES AUXILIARES ======================
+
+    def simplify_strokes(self):
+        """Simplifica strokes para performance"""
+        simplified_count = 0
+        for stroke in self.all_strokes:
+            if len(stroke.points) <= self.max_points:
+                continue
+            
+            target_points = min(self.max_points, len(stroke.points))
+            step = len(stroke.points) / target_points
+            
+            # Criar novo stroke simplificado
+            new_stroke = self.current_frame.nijigp_strokes.new()
+            new_stroke.use_cyclic = stroke.use_cyclic
+            new_stroke.material_index = stroke.material_index
+            new_stroke.select = stroke.select
+            
+            if hasattr(stroke, 'vertex_color_fill'):
+                new_stroke.vertex_color_fill = stroke.vertex_color_fill
+            
+            new_points = []
+            for i in range(target_points):
+                idx = int(i * step)
+                if idx < len(stroke.points):
+                    new_points.append(stroke.points[idx])
+            
+            new_stroke.points.add(len(new_points))
+            for j, point in enumerate(new_points):
+                new_stroke.points[j].co = point.co
+                new_stroke.points[j].strength = point.strength
+                if hasattr(point, 'pressure'):
+                    new_stroke.points[j].pressure = point.pressure
+            
+            self.current_frame.nijigp_strokes.remove(stroke)
+            simplified_count += 1
         
-        if len(contour) < 10:
-            return contour
+        if simplified_count > 0:
+            self.report({"INFO"}, f"Simplified {simplified_count} strokes")
+
+    def align_poly_and_depth_lists(self):
+        """Alinha listas de polígonos e profundidades"""
+        aligned_polys = []
+        aligned_depths = []
+        for i, poly in enumerate(self.poly_list):
+            if i < len(self.depth_list):
+                min_len = min(len(poly), len(self.depth_list[i]))
+                aligned_polys.append(poly[:min_len])
+                aligned_depths.append(self.depth_list[i][:min_len])
+            else:
+                aligned_polys.append(poly)
+                aligned_depths.append([0.0] * len(poly))
+        self.poly_list = aligned_polys
+        self.depth_list = aligned_depths
+
+    def create_safe_depth_lookup(self):
+        """Cria lookup de profundidade otimizado"""
+        co2d = []
+        depth_vals = []
+        indices = []
         
-        # Convert to integer coordinates for Clipper (better precision)
-        clipper_contour = [(int(p[0] * 100), int(p[1] * 100)) for p in contour]
+        for i, poly in enumerate(self.poly_list):
+            if i >= len(self.depth_list):
+                continue
+            depth_poly = self.depth_list[i]
+            for j, co in enumerate(poly):
+                if j >= len(depth_poly):
+                    continue
+                co2d.append(xy0(co))
+                depth_vals.append(depth_poly[j])
+                indices.append((i, j))
         
-        # Use Clipper to clean up the contour
-        # This removes self-intersections and simplifies
-        clipper = pyclipper.PyclipperOffset()
-        clipper.AddPath(clipper_contour, pyclipper.JT_ROUND, pyclipper.ET_CLOSEDPOLYGON)
+        if len(co2d) == 0:
+            raise Exception("No valid points")
         
-        # Apply a very small offset to clean up without changing shape
-        cleaned = clipper.Execute(0.01)
+        # Limitar tamanho para performance
+        max_points = 5000
+        if len(co2d) > max_points:
+            step = len(co2d) // max_points
+            co2d = co2d[::step]
+            depth_vals = depth_vals[::step]
         
-        if cleaned and len(cleaned) > 0:
-            # Convert back to float coordinates
-            cleaned_contour = [(p[0] / 100.0, p[1] / 100.0) for p in cleaned[0]]
-            return cleaned_contour
+        count = len(co2d)
+        kdt = kdtree.KDTree(count)
+        for i in range(count):
+            kdt.insert(co2d[i], i)
+        kdt.balance()
         
-        return contour
+        class SafeDepthLookup:
+            def __init__(self, depths, kdtree):
+                self.depths = depths
+                self.kdtree = kdtree
+            
+            def get_depth(self, co):
+                _, i, _ = self.kdtree.find(xy0(co))
+                return self.depths[i]
+        
+        return SafeDepthLookup(depth_vals, kdt)
+
+    def get_or_create_fill_layer(self, gp_obj):
+        """Obtém ou cria camada de preenchimento"""
+        layers = gp_obj.data.layers
+        for layer in layers:
+            name = layer.info if hasattr(layer, 'info') else layer.name
+            if name == self.fill_layer_name:
+                return layer
+        
+        if is_gpv3():
+            return layers.new(name=self.fill_layer_name, set_active=False)
+        else:
+            return layers.new(name=self.fill_layer_name)
+
+    def get_or_create_frame(self, layer, frame_number):
+        """Obtém ou cria frame no número específico"""
+        for frame in layer.frames:
+            if frame.frame_number == frame_number:
+                return frame
+        return layer.frames.new(frame_number)
 
     def get_click_3d(self, context):
-        """
-        Get 3D coordinates of mouse click using raycast against Grease Pencil strokes.
-        This is more accurate than projection-based methods.
-        """
+        """Obtém coordenadas 3D do clique do mouse"""
         region = context.region
         rv3d = context.space_data.region_3d
         
         if not region or not rv3d:
             return None
         
-        # Get mouse position in region coordinates
         coord = (self.click_x, self.click_y)
         
-        # Get ray from view through mouse position
         from bpy_extras.view3d_utils import region_2d_to_vector_3d, region_2d_to_origin_3d
         ray_origin = region_2d_to_origin_3d(region, rv3d, coord)
         ray_direction = region_2d_to_vector_3d(region, rv3d, coord)
         
-        # Find closest point on Grease Pencil strokes
+        # Encontrar ponto mais próximo nos strokes
         closest_point = None
         min_distance = float('inf')
         
@@ -518,7 +739,6 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                 p1 = stroke.points[i].co
                 p2 = stroke.points[i + 1].co
                 
-                # Find intersection of ray with line segment
                 intersect = intersect_line_line(
                     ray_origin, ray_origin + ray_direction * 10000,
                     p1, p2
@@ -526,8 +746,6 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                 
                 if intersect and len(intersect) >= 2:
                     point_on_ray = intersect[0]
-                    
-                    # Check if the intersection point is within the segment bounds
                     seg_vec = p2 - p1
                     seg_len = seg_vec.length
                     if seg_len > 0:
@@ -538,12 +756,10 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                                 min_distance = dist
                                 closest_point = point_on_ray
         
-        # If raycast didn't hit any stroke, fall back to plane intersection
+        # Fallback: plano de trabalho
         if closest_point is None:
-            # Use the working plane as fallback
             plane_normal = self.t_mat.inverted().to_3x3() @ Vector((0, 0, 1))
             plane_point = self.gp_obj.location
-            
             closest_point = intersect_line_plane(
                 ray_origin,
                 ray_origin + ray_direction * 10000,
@@ -553,89 +769,35 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         
         return closest_point
 
-    def find_triangle_at_point_with_tolerance(self, point_co, context):
-        """
-        Find triangle containing point, with tolerance.
-        If exact point not in any triangle, find nearest triangle within tolerance.
-        """
-        import pyclipper
+    def modal(self, context, event):
+        """Gerencia o modo modal para capturar clique"""
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and self._waiting_for_click:
+            self._waiting_for_click = False
+            context.window.cursor_modal_restore()
+            
+            self.click_x = event.mouse_region_x
+            self.click_y = event.mouse_region_y
+            
+            result = self.fill_at_click(context)
+            
+            if result == {'CANCELLED'}:
+                self.report({"WARNING"}, "Could not find area to fill")
+            else:
+                self.report({"INFO"}, "Fill created")
+            
+            return {'FINISHED'}
         
-        # First, check if point is inside any polygon (closed stroke)
-        inside_any_polygon = False
-        for poly in self.poly_list:
-            if pyclipper.PointInPolygon(point_co, poly) == 1:
-                inside_any_polygon = True
-                break
+        elif event.type in {'RIGHTMOUSE', 'ESC'} and event.value == 'PRESS':
+            self._waiting_for_click = False
+            context.window.cursor_modal_restore()
+            self.report({"INFO"}, "Cancelled")
+            return {'CANCELLED'}
         
-        if not inside_any_polygon:
-            # Point is outside all polygons, try to find nearby triangle with tolerance
-            return self.find_nearest_triangle(point_co, context)
-        
-        # Find exact triangle containing the point
-        for i, tri in enumerate(self.tr_map['triangles']):
-            poly = [self.tr_map['vertices'][v] for v in tri]
-            if pyclipper.PointInPolygon(point_co, poly) == 1:
-                return i
-        
-        # Point is inside a polygon but not in any triangle (rare)
-        # Fall back to nearest triangle
-        return self.find_nearest_triangle(point_co, context)
-
-    def find_nearest_triangle(self, point_co, context):
-        """
-        Find the triangle closest to the click point within tolerance.
-        """
-        point = Vector(point_co)
-        
-        # Convert pixel tolerance to world units (approximate)
-        tolerance_world = self.click_tolerance / 50.0
-        
-        # Find triangle with closest center
-        best_idx = -1
-        best_dist = float('inf')
-        
-        for i, center in enumerate(self.triangle_centers):
-            dist = (center - point).length
-            if dist < best_dist and dist < tolerance_world:
-                best_dist = dist
-                best_idx = i
-        
-        if best_idx >= 0 and best_dist > 0:
-            self.report({"INFO"}, f"Click adjusted by {best_dist:.2f} units")
-        
-        return best_idx
+        return {'RUNNING_MODAL'}
 
 
-def lineart_triangulation(stroke_list, t_mat, poly_list, scale_factor, resolution):
-    """
-    Perform Delaunay triangulation on the line art strokes.
-    Returns a triangle map compatible with SmartFillSolver.
-    """
-    corners = get_2d_bound_box(stroke_list, t_mat)
-    corners = [co * scale_factor for co in corners]
-    co_idx = {}
-    tr_input = dict(vertices=[], segments=[])
-    
-    for i, co_list in enumerate(poly_list):
-        for j, co in enumerate(co_list):
-            key = (int(co[0] * resolution), int(co[1] * resolution))
-            if key not in co_idx:
-                co_idx[key] = len(co_idx)
-                tr_input['vertices'].append(tuple(co))
-            if j > 0:
-                key0 = (int(co_list[j-1][0] * resolution), int(co_list[j-1][1] * resolution))
-                tr_input['segments'].append((co_idx[key], co_idx[key0]))
-            if j == len(co_list) - 1 and stroke_list[i].use_cyclic:
-                key0 = (int(co_list[0][0] * resolution), int(co_list[0][1] * resolution))
-                tr_input['segments'].append((co_idx[key], co_idx[key0]))
-    
-    # Add margins to the bounding box to ensure complete triangulation
-    margin_sizes = (0.1, 0.3, 0.5)
-    for ratio in margin_sizes:
-        tr_input['vertices'].extend(pad_2d_box(corners, ratio))
-    
-    tr_output = {}
-    tr_output['vertices'], tr_output['segments'], tr_output['triangles'], _, tr_output['orig_edges'], _ = \
-        geometry.delaunay_2d_cdt(tr_input['vertices'], tr_input['segments'], [], 0, 1e-9)
-    
-    return tr_output
+def register():
+    pass
+
+def unregister():
+    pass

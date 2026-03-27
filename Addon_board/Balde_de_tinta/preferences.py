@@ -305,6 +305,15 @@ class NijiGPAddonPreferences(bpy.types.AddonPreferences):
         step=1,
         subtype='PIXEL'
     )
+    bucket_fill_auto_close_gap: bpy.props.FloatProperty(
+        name="Auto-Close Gap",
+        description="Automatically close gaps in strokes smaller than this distance (pixels)",
+        default=10.0,
+        min=0.0,
+        max=50.0,
+        step=1,
+        subtype='PIXEL'
+    )
     bucket_fill_use_fill_layer: bpy.props.BoolProperty(
         name="Use Fill Layer",
         description="Place fill strokes in a separate layer instead of the active layer",
@@ -314,6 +323,18 @@ class NijiGPAddonPreferences(bpy.types.AddonPreferences):
         name="Fill Layer Name",
         description="Name of the layer where fill strokes will be placed",
         default="Fills"
+    )
+    bucket_fill_use_simplification: bpy.props.BoolProperty(
+        name="Simplify Complex Strokes",
+        description="Reduce number of points in strokes for better performance",
+        default=True
+    )
+    bucket_fill_max_points: bpy.props.IntProperty(
+        name="Max Points per Stroke",
+        description="Maximum points to process per stroke (0 = unlimited)",
+        default=500,
+        min=0,
+        max=5000
     )
 
     shortcut_button_enabled: bpy.props.BoolProperty(

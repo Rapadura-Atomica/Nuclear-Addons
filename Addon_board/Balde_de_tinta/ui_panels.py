@@ -1,7 +1,6 @@
 import bpy
 from .api_router import *
 
-# Constant for addon name
 ADDON_NAME = "Balde_de_tinta"
 
 
@@ -17,7 +16,6 @@ class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         
-        # Get preferences
         try:
             prefs = context.preferences.addons[ADDON_NAME].preferences
         except KeyError:
@@ -27,30 +25,29 @@ class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
         box = layout.box()
         box.label(text="Bucket Fill", icon='SHADING_SOLID')
         
-        # Operator button
         row = box.row()
         row.operator("gpencil.nijigp_simple_bucket_fill", text="Fill", icon='SHADING_SOLID')
         
-        # Tolerance slider (only if preferences available)
         if prefs:
             row = box.row()
             row.prop(prefs, "bucket_fill_tolerance", text="Tolerance (px)")
-            
-            # Auto-close gap slider
             row = box.row()
             row.prop(prefs, "bucket_fill_auto_close_gap", text="Auto-Close Gap (px)")
             
-            # Fill layer option
+            # Performance options
+            row = box.row()
+            row.prop(prefs, "bucket_fill_use_simplification", text="Simplify Complex Strokes")
+            if prefs.bucket_fill_use_simplification:
+                row = box.row()
+                row.prop(prefs, "bucket_fill_max_points", text="Max Points per Stroke")
+            
+            # Fill layer options
             row = box.row()
             row.prop(prefs, "bucket_fill_use_fill_layer", text="Use Fill Layer")
-            
             if prefs.bucket_fill_use_fill_layer:
                 row = box.row()
                 row.prop(prefs, "bucket_fill_layer_name", text="Fill Layer")
-        else:
-            box.label(text="Preferences not available", icon='ERROR')
         
-        # Separator
         layout.separator()
         
         # Original operators
