@@ -13,9 +13,11 @@
 
 import bpy
 import numpy as np
+import time
+import traceback
 from mathutils import *
 from mathutils.geometry import intersect_line_plane, intersect_line_line
-import time
+from math import isclose
 
 # Import from addon modules
 from ..utils import *
@@ -44,6 +46,13 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     _waiting_for_click = False
+    
+    # Debug options
+    debug_mode: bpy.props.BoolProperty(
+        name="Debug Mode",
+        description="Enable debug logging",
+        default=False
+    )
 
     @classmethod
     def poll(cls, context):
@@ -92,7 +101,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         
         self.gp_obj = context.object
         self.original_mode = context.mode
-        self.current_frame_number = context.scene.frame_current  # Armazena frame atual
+        self.current_frame_number = context.scene.frame_current
         
         result = self.prepare_data(context)
         if result == {'CANCELLED'}:
@@ -109,7 +118,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         return {'RUNNING_MODAL'}
 
     def prepare_data(self, context):
-        """Pre-compute transformation and triangulation - OTIMIZADO"""
+        """Pre-compute transformation and triangulation"""
         gp_obj = self.gp_obj
         active_layer = gp_obj.data.layers.active
         
@@ -123,7 +132,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         else:
             self.fill_layer = active_layer
         
-        # IMPORTANTE: USAR APENAS O FRAME ATUAL, não todos os keyframes
+        # Get current frame
         if is_gpv3():
             self.current_frame = active_layer.active_frame
         else:
@@ -132,13 +141,13 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         if not self.current_frame:
             self.current_frame = active_layer.frames.new(self.current_frame_number)
         
-        # Garantir que o fill frame está no mesmo número de frame
+        # Ensure fill frame exists
         if self.use_fill_layer:
             self.fill_frame = self.get_or_create_frame(self.fill_layer, self.current_frame_number)
         else:
             self.fill_frame = self.current_frame
         
-        # Get all strokes do frame atual APENAS
+        # Get all strokes from current frame
         self.all_strokes = get_input_strokes(gp_obj, self.current_frame, select_all=True)
         
         if len(self.all_strokes) < 1:
@@ -174,7 +183,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         
         # Create depth lookup
         try:
-            self.depth_lookup = self.create_safe_depth_lookup()
+            self.depth_lookup = DepthLookupTree(self.poly_list, self.depth_list)
         except Exception as e:
             self.report({"WARNING"}, f"Depth lookup failed: {str(e)}")
             return {'CANCELLED'}
@@ -191,7 +200,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         self.solver = SmartFillSolver()
         self.solver.build_graph(self.tr_map)
         
-        # Precompute triangle centers (2D) para busca rápida
+        # Precompute triangle centers for fast search
         self.triangle_centers = []
         for tri in self.tr_map['triangles']:
             v0 = Vector(self.tr_map['vertices'][tri[0]])
@@ -200,7 +209,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             center = (v0 + v1 + v2) / 3
             self.triangle_centers.append(center)
         
-        # KDTree para busca rápida de triângulo
+        # KDTree for fast triangle search
         self.triangle_kdtree = kdtree.KDTree(len(self.triangle_centers))
         for i, center in enumerate(self.triangle_centers):
             self.triangle_kdtree.insert(Vector((center.x, center.y, 0.0)), i)
@@ -209,14 +218,14 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         return {'FINISHED'}
 
     def get_2d_co_with_guides(self, strokes, t_mat):
-        """Convert strokes to 2D and generate guide lines - OTIMIZADO"""
+        """Convert strokes to 2D and generate guide lines"""
         import pyclipper
         
         poly_list = []
         depth_list = []
         guide_count = 0
         
-        # Primeira passada: converter strokes
+        # First pass: convert strokes to 2D
         for stroke in strokes:
             if len(stroke.points) < 2:
                 continue
@@ -232,7 +241,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             poly_list.append(co_list)
             depth_list.append(depth_vals)
         
-        # Scale factor
+        # Calculate scale factor
         if len(poly_list) > 0:
             all_coords = [co for poly in poly_list for co in poly]
             if all_coords:
@@ -251,18 +260,18 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         else:
             scale_factor = 1.0
         
-        # Guias para fechar gaps (apenas se necessário)
+        # Guides for closing gaps
         if self.auto_close_gap > 0 and len(poly_list) > 0:
             gap_threshold = self.auto_close_gap / 25.0 * scale_factor
             
-            # Coletar endpoints
+            # Collect endpoints
             endpoints = []
             for i, poly in enumerate(poly_list):
                 if len(poly) >= 2:
                     endpoints.append((poly[0], i))
                     endpoints.append((poly[-1], i))
             
-            # Criar conexões entre endpoints próximos
+            # Find and connect nearby endpoints
             used = set()
             connections = 0
             
@@ -308,8 +317,8 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         min_x, max_x = min(xs), max(xs)
         min_y, max_y = min(ys), max(ys)
         
-        # Margem menor para melhor performance
-        expand = max(max_x - min_x, max_y - min_y) * 0.2
+        # Add margin
+        expand = max(max_x - min_x, max_y - min_y) * 0.1
         min_x -= expand
         max_x += expand
         min_y -= expand
@@ -318,7 +327,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         co_idx = {}
         tr_input = dict(vertices=[], segments=[])
         
-        # Adicionar segmentos das polilinhas
+        # Add segments from polylines
         for co_list in self.poly_list:
             if len(co_list) < 2:
                 continue
@@ -335,7 +344,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                 
                 prev_key = co_idx[key]
         
-        # Adicionar pontos de borda (menos para performance)
+        # Add boundary points
         for x in [min_x, max_x]:
             for y in [min_y, max_y]:
                 key = (int(x * 0.05), int(y * 0.05))
@@ -353,11 +362,11 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             return {'vertices': [], 'segments': [], 'triangles': [], 'orig_edges': []}
 
     def extract_boundary_contour(self, labels):
-        """Extrai contorno da região rotulada - mais preciso"""
+        """Extrai contorno da região rotulada"""
         triangles = self.tr_map['triangles']
         vertices = self.tr_map['vertices']
         
-        # Mapear arestas para triângulos
+        # Map edges to triangles
         edge_to_tris = {}
         for t_idx, tri in enumerate(triangles):
             for i in range(3):
@@ -368,7 +377,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                     edge_to_tris[key] = []
                 edge_to_tris[key].append(t_idx)
         
-        # Coletar arestas de fronteira
+        # Collect boundary edges
         boundary_edges = []
         for key, tris in edge_to_tris.items():
             if len(tris) == 1:
@@ -382,13 +391,13 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         if not boundary_edges:
             return None
         
-        # Construir grafo de arestas
+        # Build edge graph
         graph = {}
         for a, b in boundary_edges:
             graph.setdefault(a, []).append(b)
             graph.setdefault(b, []).append(a)
         
-        # Encontrar ponto inicial
+        # Find start point
         start = None
         for v, neighbors in graph.items():
             if len(neighbors) == 1:
@@ -397,16 +406,17 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         if start is None:
             start = next(iter(graph.keys()))
         
-        # Caminhar pelo contorno
+        # Walk the contour
         contour = []
         current = start
         prev = None
+        max_iterations = len(boundary_edges) * 2
+        iteration = 0
         
-        while True:
+        while iteration < max_iterations:
             contour.append(current)
             neighbors = graph.get(current, [])
             
-            # Escolher próximo ponto
             next_v = None
             for n in neighbors:
                 if n != prev:
@@ -418,26 +428,24 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             
             prev = current
             current = next_v
+            iteration += 1
         
         if len(contour) < 3:
             return None
         
-        # Converter para coordenadas 2D
+        # Convert to 2D coordinates
         return [vertices[v] for v in contour]
 
     def find_triangle_exact(self, point_co):
-        """Encontra triângulo que contém o ponto - com pequena tolerância"""
+        """Encontra triângulo que contém o ponto"""
         import pyclipper
         
         point = (point_co[0], point_co[1])
         
-        # Busca otimizada: testar triângulos próximos primeiro
-        # IMPORTANTE: KDTree espera vetor 3D, então criamos um Vector 3D
-        search_center = Vector((point_co[0], point_co[1], 0.0))
-        
-        # Verificar se temos KDTree
+        # Search with KDTree
         if hasattr(self, 'triangle_kdtree') and self.triangle_kdtree:
-            nearest = self.triangle_kdtree.find_n(search_center, 20)
+            search_center = Vector((point_co[0], point_co[1], 0.0))
+            nearest = self.triangle_kdtree.find_n(search_center, 50)
             
             for _, idx, _ in nearest:
                 if idx < len(self.tr_map['triangles']):
@@ -446,13 +454,14 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                     if pyclipper.PointInPolygon(point, poly) == 1:
                         return idx
                     
-                    # Testar com pequena tolerância (ajuda em bordas)
-                    for offset in [(0.5, 0), (-0.5, 0), (0, 0.5), (0, -0.5)]:
-                        test_pt = (point[0] + offset[0], point[1] + offset[1])
+                    # Test with small tolerance
+                    tolerance = self.click_tolerance / 100.0
+                    for dx, dy in [(tolerance, 0), (-tolerance, 0), (0, tolerance), (0, -tolerance)]:
+                        test_pt = (point[0] + dx, point[1] + dy)
                         if pyclipper.PointInPolygon(test_pt, poly) == 1:
                             return idx
         
-        # Fallback: busca linear em todos os triângulos
+        # Fallback: linear search
         for i, tri in enumerate(self.tr_map['triangles']):
             poly = [self.tr_map['vertices'][v] for v in tri]
             if pyclipper.PointInPolygon(point, poly) == 1:
@@ -462,18 +471,17 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
 
     def find_nearest_triangle(self, point_co):
         """Encontra triângulo mais próximo (fallback)"""
-        # IMPORTANTE: KDTree espera vetor 3D
         point = Vector((point_co[0], point_co[1], 0.0))
         tolerance = self.click_tolerance * 2.0
         
         if hasattr(self, 'triangle_kdtree') and self.triangle_kdtree:
-            nearest = self.triangle_kdtree.find_n(point, 10)
+            nearest = self.triangle_kdtree.find_n(point, 20)
             
             for co, idx, dist in nearest:
                 if dist < tolerance:
                     return idx
         
-        # Fallback: busca linear com distância
+        # Fallback: linear search with distance
         best_idx = -1
         best_dist = float('inf')
         point_2d = Vector((point_co[0], point_co[1]))
@@ -487,11 +495,11 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         return best_idx
 
     def simplify_contour(self, contour, target_points=100):
-        """Simplifica contorno para melhor performance e qualidade"""
+        """Simplifica contorno para melhor performance"""
         if len(contour) <= target_points:
             return contour
         
-        # Amostragem uniforme
+        # Uniform sampling
         step = len(contour) / target_points
         simplified = []
         for i in range(target_points):
@@ -509,13 +517,17 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "Could not determine click position")
             return {'CANCELLED'}
         
+        # Transform click to 2D space
         click_2d = self.t_mat @ click_3d
         click_2d_scaled = (
             click_2d[0] * self.scale_factor,
             click_2d[1] * self.scale_factor
         )
         
-        # Encontrar triângulo do clique
+        # Store click depth for fallback
+        click_depth = click_2d[2]
+        
+        # Find triangle at click
         triangle_idx = self.find_triangle_exact(click_2d_scaled)
         
         if triangle_idx < 0:
@@ -525,7 +537,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "No triangle found at click position")
             return {'CANCELLED'}
         
-        # Propagar labels
+        # Propagate labels
         self.solver.labels = -np.ones(len(self.tr_map['triangles']), dtype=np.int32)
         self.solver.labels[triangle_idx] = 1
         self.solver.propagate_labels()
@@ -536,11 +548,11 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "Region too small")
             return {'CANCELLED'}
         
-        # Extrair contorno
+        # Extract contour
         target_contour = self.extract_boundary_contour(self.solver.labels)
         
         if not target_contour or len(target_contour) < 3:
-            # Fallback: método do SmartFillSolver
+            # Fallback to SmartFillSolver method
             contours, component_labels = self.solver.get_contours()
             for i, contour_list in enumerate(contours):
                 if i < len(component_labels) and component_labels[i] == 1:
@@ -552,10 +564,10 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             self.report({"WARNING"}, "Could not extract contour")
             return {'CANCELLED'}
         
-        # Simplificar contorno para qualidade
+        # Simplify contour
         target_contour = self.simplify_contour(target_contour, 200)
         
-        # Material
+        # Get material
         if self.gp_obj.active_material:
             material_index = self.gp_obj.material_slots.find(self.gp_obj.active_material.name)
             if material_index < 0:
@@ -563,7 +575,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         else:
             material_index = 0
         
-        # Criar stroke de preenchimento
+        # Create fill stroke
         new_stroke = self.fill_frame.nijigp_strokes.new()
         new_stroke.use_cyclic = True
         new_stroke.material_index = material_index
@@ -572,20 +584,21 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         num_points = len(target_contour)
         new_stroke.points.add(num_points)
         
-        # Restaurar coordenadas 3D
+        # Restore 3D coordinates - CORRIGIDO
         for i, co_2d in enumerate(target_contour):
             try:
+                # Try to get depth from lookup
                 depth = self.depth_lookup.get_depth(co_2d)
                 co_3d = restore_3d_co(co_2d, depth, self.inv_mat, self.scale_factor)
                 new_stroke.points[i].co = co_3d
                 new_stroke.points[i].strength = 1.0
             except:
-                # Fallback: usar profundidade do clique
-                co_3d = restore_3d_co(co_2d, click_2d[2], self.inv_mat, self.scale_factor)
+                # Fallback: use click depth
+                co_3d = restore_3d_co(co_2d, click_depth, self.inv_mat, self.scale_factor)
                 new_stroke.points[i].co = co_3d
                 new_stroke.points[i].strength = 1.0
         
-        # Limpar seleção e restaurar
+        # Clear selection and restore
         op_deselect()
         new_stroke.select = True
         refresh_strokes(self.gp_obj, [self.fill_frame.frame_number])
@@ -595,6 +608,41 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         return {'FINISHED'}
 
     # ====================== FUNÇÕES AUXILIARES ======================
+
+    def align_poly_and_depth_lists(self):
+        """Alinha listas de polígonos e profundidades"""
+        aligned_polys = []
+        aligned_depths = []
+        for i, poly in enumerate(self.poly_list):
+            if i < len(self.depth_list):
+                min_len = min(len(poly), len(self.depth_list[i]))
+                aligned_polys.append(poly[:min_len])
+                aligned_depths.append(self.depth_list[i][:min_len])
+            else:
+                aligned_polys.append(poly)
+                aligned_depths.append([0.0] * len(poly))
+        self.poly_list = aligned_polys
+        self.depth_list = aligned_depths
+
+    def get_or_create_fill_layer(self, gp_obj):
+        """Obtém ou cria camada de preenchimento"""
+        layers = gp_obj.data.layers
+        for layer in layers:
+            name = layer.info if hasattr(layer, 'info') else layer.name
+            if name == self.fill_layer_name:
+                return layer
+        
+        if is_gpv3():
+            return layers.new(name=self.fill_layer_name, set_active=False)
+        else:
+            return layers.new(name=self.fill_layer_name)
+
+    def get_or_create_frame(self, layer, frame_number):
+        """Obtém ou cria frame no número específico"""
+        for frame in layer.frames:
+            if frame.frame_number == frame_number:
+                return frame
+        return layer.frames.new(frame_number)
 
     def simplify_strokes(self):
         """Simplifica strokes para performance"""
@@ -606,7 +654,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
             target_points = min(self.max_points, len(stroke.points))
             step = len(stroke.points) / target_points
             
-            # Criar novo stroke simplificado
+            # Create simplified stroke
             new_stroke = self.current_frame.nijigp_strokes.new()
             new_stroke.use_cyclic = stroke.use_cyclic
             new_stroke.material_index = stroke.material_index
@@ -634,87 +682,8 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         if simplified_count > 0:
             self.report({"INFO"}, f"Simplified {simplified_count} strokes")
 
-    def align_poly_and_depth_lists(self):
-        """Alinha listas de polígonos e profundidades"""
-        aligned_polys = []
-        aligned_depths = []
-        for i, poly in enumerate(self.poly_list):
-            if i < len(self.depth_list):
-                min_len = min(len(poly), len(self.depth_list[i]))
-                aligned_polys.append(poly[:min_len])
-                aligned_depths.append(self.depth_list[i][:min_len])
-            else:
-                aligned_polys.append(poly)
-                aligned_depths.append([0.0] * len(poly))
-        self.poly_list = aligned_polys
-        self.depth_list = aligned_depths
-
-    def create_safe_depth_lookup(self):
-        """Cria lookup de profundidade otimizado"""
-        co2d = []
-        depth_vals = []
-        indices = []
-        
-        for i, poly in enumerate(self.poly_list):
-            if i >= len(self.depth_list):
-                continue
-            depth_poly = self.depth_list[i]
-            for j, co in enumerate(poly):
-                if j >= len(depth_poly):
-                    continue
-                co2d.append(xy0(co))
-                depth_vals.append(depth_poly[j])
-                indices.append((i, j))
-        
-        if len(co2d) == 0:
-            raise Exception("No valid points")
-        
-        # Limitar tamanho para performance
-        max_points = 5000
-        if len(co2d) > max_points:
-            step = len(co2d) // max_points
-            co2d = co2d[::step]
-            depth_vals = depth_vals[::step]
-        
-        count = len(co2d)
-        kdt = kdtree.KDTree(count)
-        for i in range(count):
-            kdt.insert(co2d[i], i)
-        kdt.balance()
-        
-        class SafeDepthLookup:
-            def __init__(self, depths, kdtree):
-                self.depths = depths
-                self.kdtree = kdtree
-            
-            def get_depth(self, co):
-                _, i, _ = self.kdtree.find(xy0(co))
-                return self.depths[i]
-        
-        return SafeDepthLookup(depth_vals, kdt)
-
-    def get_or_create_fill_layer(self, gp_obj):
-        """Obtém ou cria camada de preenchimento"""
-        layers = gp_obj.data.layers
-        for layer in layers:
-            name = layer.info if hasattr(layer, 'info') else layer.name
-            if name == self.fill_layer_name:
-                return layer
-        
-        if is_gpv3():
-            return layers.new(name=self.fill_layer_name, set_active=False)
-        else:
-            return layers.new(name=self.fill_layer_name)
-
-    def get_or_create_frame(self, layer, frame_number):
-        """Obtém ou cria frame no número específico"""
-        for frame in layer.frames:
-            if frame.frame_number == frame_number:
-                return frame
-        return layer.frames.new(frame_number)
-
     def get_click_3d(self, context):
-        """Obtém coordenadas 3D do clique do mouse"""
+        """Obtém coordenadas 3D do clique do mouse - CORRIGIDO"""
         region = context.region
         rv3d = context.space_data.region_3d
         
@@ -724,10 +693,11 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
         coord = (self.click_x, self.click_y)
         
         from bpy_extras.view3d_utils import region_2d_to_vector_3d, region_2d_to_origin_3d
+        
         ray_origin = region_2d_to_origin_3d(region, rv3d, coord)
         ray_direction = region_2d_to_vector_3d(region, rv3d, coord)
         
-        # Encontrar ponto mais próximo nos strokes
+        # Find closest point on strokes
         closest_point = None
         min_distance = float('inf')
         
@@ -756,7 +726,7 @@ class NIJIGP_OT_simple_bucket_fill(bpy.types.Operator):
                                 min_distance = dist
                                 closest_point = point_on_ray
         
-        # Fallback: plano de trabalho
+        # Fallback: working plane
         if closest_point is None:
             plane_normal = self.t_mat.inverted().to_3x3() @ Vector((0, 0, 1))
             plane_point = self.gp_obj.location

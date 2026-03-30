@@ -50,8 +50,5 @@ class NIJIGP_PT_draw_panel_line(bpy.types.Panel):
         
         layout.separator()
         
-        # Original operators
-        row = layout.row()
-        row.operator("gpencil.nijigp_fit_last", icon='MOD_SMOOTH')
         row = layout.row()
         row.operator("gpencil.nijigp_smart_fill", icon='SHADING_SOLID')
