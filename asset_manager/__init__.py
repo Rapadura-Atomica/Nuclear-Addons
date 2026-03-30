@@ -23,10 +23,11 @@ from bpy_extras.io_utils import ImportHelper
 from bpy.app.handlers import persistent
 
 from .grease_pencil_operators import (
-    GP_OT_add_current_to_library,
-    GP_OT_apply_pose,
+    GP_OT_save_library,
+    GP_OT_import_library,
     GP_OT_refresh_library,
-    GP_OT_delete_pose
+    GP_OT_apply_pose,
+    GP_OT_delete_library,
 )
 from .grease_pencil_ui import (
     GP_PT_library_panel,
@@ -81,7 +82,8 @@ def register_asset_library(context=None):
             return
     try:
         new_lib = libs.new(name=lib_name, directory=str(assets_dir))
-        new_lib.import_method = 'APPEND_REUSE'
+        # CORREÇÃO: Usar 'APPEND' em vez de 'APPEND_REUSE' no Blender 5.0
+        new_lib.import_method = 'APPEND'  # Mudado de 'APPEND_REUSE'
         print(f"Asset Library registrada: {lib_name} → {assets_dir}")
     except Exception as e:
         print(f"Erro ao registrar library: {e}")
@@ -471,10 +473,11 @@ classes = (
     ASSETMANAGER_OT_import_animatic,
     ASSETMANAGER_OT_duplicate_project,
     ASSETMANAGER_PT_main,
-    GP_OT_add_current_to_library,
+    GP_OT_save_library,
     GP_OT_apply_pose,
+    GP_OT_import_library,
     GP_OT_refresh_library,
-    GP_OT_delete_pose,
+    GP_OT_delete_library,
     GP_PT_library_panel,
     GP_PT_library_settings,
 )

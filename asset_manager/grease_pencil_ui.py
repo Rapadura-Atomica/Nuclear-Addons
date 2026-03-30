@@ -1,8 +1,3 @@
-# grease_pencil_ui.py
-"""
-UI para a biblioteca Grease Pencil
-"""
-
 import bpy
 from .grease_pencil_library import GPLibrary
 
@@ -15,15 +10,15 @@ class GP_PT_library_panel(bpy.types.Panel):
     bl_region_type = 'UI'
     bl_category = "Asset Pro"
     bl_parent_id = "ASSETMANAGER_PT_main"
-    bl_options = {'DEFAULT_CLOSED'}
     
     def draw(self, context):
         layout = self.layout
         library = GPLibrary()
         
-        # Header com ações
+        # Ações principais
         row = layout.row(align=True)
-        row.operator("gp.add_current_to_library", icon='ADD', text="Add Current")
+        row.operator("gp.save_library", icon='FILE_BLEND', text="Save as Library")
+        row.operator("gp.import_library", icon='IMPORT', text="Import")
         row.operator("gp.refresh_library", icon='FILE_REFRESH', text="")
         
         if not library.project_path:
@@ -31,43 +26,50 @@ class GP_PT_library_panel(bpy.types.Panel):
             layout.label(text="Use 'Iniciar Projeto' first")
             return
         
-        # Estatísticas
-        poses_count = len(library.poses)
-        if poses_count == 0:
-            layout.label(text="No poses in library", icon='INFO')
-            layout.label(text="Select a Grease Pencil and click 'Add Current'")
+        # Bibliotecas disponíveis
+        libraries = library.get_libraries()
+        if not libraries:
+            layout.label(text="No libraries", icon='INFO')
+            layout.label(text="Select a Grease Pencil and click 'Save as Library'")
             return
         
-        # Filtro por categoria
-        categories = library.get_categories_with_poses()
+        # Listar bibliotecas
+        for lib_name, lib_info in libraries.items():
+            self.draw_library(layout, context, library, lib_name, lib_info)
+    
+    def draw_library(self, layout, context, library, lib_name, lib_info):
+        """Desenha uma biblioteca e suas poses"""
+        box = layout.box()
         
-        row = layout.row()
-        row.label(text=f"Total: {poses_count} poses", icon='GREASEPENCIL')
+        # Header da biblioteca
+        row = box.row(align=True)
+        row.label(text=f"📚 {lib_name}", icon='FILE_BLEND')
         
-        # Layout em grid para as poses
-        flow = layout.grid_flow(row_major=True, columns=0, even_columns=True, 
-                                even_rows=False, align=True)
+        # Botões de ação da biblioteca
+        row = box.row(align=True)
+        row.label(text=f"Poses: {len([p for p in library.poses.values() if p.library_name == lib_name])}")
         
-        # Agrupar por categoria
-        for category, count in categories.items():
-            col = flow.column(align=True)
-            col.label(text=f"{category.capitalize()} ({count})", icon='FILE_FOLDER')
-            
-            poses = library.get_poses_by_category(category)
-            for pose in poses:
-                self.draw_pose_button(col, context, pose)
+        op_del = row.operator("gp.delete_library", text="", icon='X')
+        op_del.library_name = lib_name
+        
+        # Poses da biblioteca
+        poses = library.get_poses(library_name=lib_name)
+        flow = box.grid_flow(row_major=True, columns=3, even_columns=True, even_rows=False)
+        
+        for pose in poses:
+            self.draw_pose_button(flow, context, pose)
     
     def draw_pose_button(self, layout, context, pose):
         """Desenha um botão para uma pose específica"""
         row = layout.row(align=True)
+
+        if not pose or not pose.id:
+            row.label(text="Invalid pose")
+            return
         
-        # Botão principal da pose
-        op = row.operator("gp.apply_pose", text=pose.name)
+        # Nome da pose
+        op = row.operator("gp.apply_pose", text=f"🎨 Frame {pose.frame_number}: {pose.name}")
         op.pose_id = pose.id
-        
-        # Botão de deletar
-        op_del = row.operator("gp.delete_pose", text="", icon='X')
-        op_del.pose_id = pose.id
 
 
 class GP_PT_library_settings(bpy.types.Panel):
@@ -82,7 +84,14 @@ class GP_PT_library_settings(bpy.types.Panel):
     
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Coming soon:", icon='SETTINGS')
-        layout.label(text="- Thumbnail previews")
-        layout.label(text="- Auto-refresh on file changes")
-        layout.label(text="- Multi-object substitution")
+        library = GPLibrary()
+        
+        layout.label(text="Libraries Location:", icon='FILE_FOLDER')
+        if library.libraries_path:
+            layout.label(text=str(library.libraries_path))
+        
+        layout.separator()
+        layout.label(text="Tips:", icon='INFO')
+        layout.label(text="• Save a GP object as library")
+        layout.label(text="• Each frame becomes a pose")
+        layout.label(text="• Import libraries between projects")

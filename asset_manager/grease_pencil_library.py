@@ -1,102 +1,78 @@
-# grease_pencil_library.py
 """
-Módulo de Biblioteca Grease Pencil para Asset Manager Pro
-Implementa o sistema de drawing substitution para animadores
+Módulo de Biblioteca Grease Pencil - Versão com Bibliotecas Portáveis
+Suporte a múltiplas poses por arquivo .blend
 """
 
 import bpy
-import os
 import json
 import uuid
+import shutil
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
-import math
-import shutil
-import tempfile
+import os
 
 # ===========================================================================
-# CONFIGURAÇÕES GREASE PENCIL
+# CONFIGURAÇÕES
 # ===========================================================================
 GP_LIBRARY_CONFIG = {
-    'library_filename': 'gp_library.json',
-    'drawings_folder': 'grease_pencil/drawings',
-    'previews_folder': 'grease_pencil/previews',
+    'libraries_folder': 'grease_pencil/libraries',
+    'thumbnails_folder': 'grease_pencil/thumbnails',
+    'index_filename': 'gp_library_index.json',
     'thumbnail_size': (256, 256),
-    'thumbnail_quality': 90
 }
 
-GP_POSE_CATEGORIES = [
-    'hands', 'mouths', 'eyes', 'eyebrows', 'head', 'body',
-    'props', 'expressions', 'custom'
-]
-
-
-# ===========================================================================
-# ESTRUTURA DE DADOS
-# ===========================================================================
-class GPPoseData:
-    """Representa uma pose/desenho na biblioteca"""
+class GPPose:
+    """Representa uma pose individual dentro de uma biblioteca"""
     def __init__(self):
-        self.id = ""
-        self.name = ""
-        self.category = "custom"
-        self.tags = []
-        self.blend_path = ""
-        self.data_block_name = ""
-        self.thumbnail_path = ""
-        self.vertex_groups = []
-        self.layers = []
-        self.created = ""
-        self.modified = ""
-        self.description = ""
-    
+        self.id = ""                    # UUID único
+        self.name = ""                  # Nome da pose
+        self.library_name = ""          # Nome do arquivo .blend
+        self.library_path = ""          # Caminho relativo ao projeto
+        self.frame_number = 0           # Frame onde a pose está
+        self.category = "custom"        # Categoria
+        self.tags = []                  # Tags para busca
+        self.thumbnail_path = ""        # Caminho do thumbnail
+        self.description = ""           # Descrição
+        self.created = ""               # Data de criação
+        
     def to_dict(self):
         return {
             'id': self.id,
             'name': self.name,
+            'library_name': self.library_name,
+            'library_path': self.library_path,
+            'frame_number': self.frame_number,
             'category': self.category,
             'tags': self.tags,
-            'blend_path': self.blend_path,
-            'data_block_name': self.data_block_name,
             'thumbnail_path': self.thumbnail_path,
-            'vertex_groups': self.vertex_groups,
-            'layers': self.layers,
+            'description': self.description,
             'created': self.created,
-            'modified': self.modified,
-            'description': self.description
         }
     
     def from_dict(self, data):
-        self.id = data.get('id', '')
-        self.name = data.get('name', '')
-        self.category = data.get('category', 'custom')
-        self.tags = data.get('tags', [])
-        self.blend_path = data.get('blend_path', '')
-        self.data_block_name = data.get('data_block_name', '')
-        self.thumbnail_path = data.get('thumbnail_path', '')
-        self.vertex_groups = data.get('vertex_groups', [])
-        self.layers = data.get('layers', [])
-        self.created = data.get('created', '')
-        self.modified = data.get('modified', '')
-        self.description = data.get('description', '')
+        for k, v in data.items():
+            if hasattr(self, k):
+                setattr(self, k, v)
         return self
 
 
 class GPLibrary:
-    """Gerencia a biblioteca de poses Grease Pencil"""
+    """Gerenciador principal da biblioteca de poses"""
     
     def __init__(self):
         self.project_path = self._find_project_path()
-        self.library_path = None
-        self.master_json_path = None
-        self.poses = {}  # id -> GPPoseData (sempre objeto!)
+        self.libraries_path = None
+        self.index_path = None
+        self.poses = {}  # id -> GPPose
+        self.libraries = {}  # library_name -> library_info
         
         if self.project_path:
             self._setup_paths()
-            self._load_master_json()
+            self._load_index()
     
     def _find_project_path(self) -> Optional[Path]:
+        """Encontra o caminho do projeto atual"""
         if not bpy.data.filepath:
             return None
         current = Path(bpy.data.filepath).parent.resolve()
@@ -106,133 +82,591 @@ class GPLibrary:
         return None
     
     def _setup_paths(self):
+        """Configura os caminhos da biblioteca"""
         assets_dir = self.project_path / "assets"
-        self.library_path = assets_dir / "grease_pencil"
-        self.master_json_path = self.library_path / GP_LIBRARY_CONFIG['library_filename']
+        self.libraries_path = assets_dir / GP_LIBRARY_CONFIG['libraries_folder']
+        self.thumbnails_path = assets_dir / GP_LIBRARY_CONFIG['thumbnails_folder']
+        self.index_path = assets_dir / GP_LIBRARY_CONFIG['index_filename']
         
-        self.library_path.mkdir(parents=True, exist_ok=True)
-        (self.library_path / "drawings").mkdir(exist_ok=True)
-        (self.library_path / "previews").mkdir(exist_ok=True)
+        # Criar pastas necessárias
+        self.libraries_path.mkdir(parents=True, exist_ok=True)
+        self.thumbnails_path.mkdir(parents=True, exist_ok=True)
     
-    def _load_master_json(self):
+    def _load_index(self):
+        """Carrega o índice de bibliotecas e poses"""
         self.poses.clear()
-        if not self.master_json_path or not self.master_json_path.exists():
+        self.libraries.clear()
+        
+        if not self.index_path or not self.index_path.exists():
             return
         
         try:
-            with open(self.master_json_path, 'r', encoding='utf-8') as f:
+            with open(self.index_path, 'r', encoding='utf-8') as f:
                 data = json.load(f)
             
+            # Carregar bibliotecas
+            for lib_name, lib_info in data.get('libraries', {}).items():
+                self.libraries[lib_name] = lib_info
+            
+            # Carregar poses
             for pose_id, pose_data in data.get('poses', {}).items():
-                pose = GPPoseData().from_dict(pose_data)
+                pose = GPPose().from_dict(pose_data)
                 self.poses[pose_id] = pose
+                
         except Exception as e:
-            print(f"Erro ao carregar GP Library JSON: {e}")
+            print(f"Erro ao carregar índice: {e}")
     
-    def _save_master_json(self):
-        if not self.master_json_path:
+    def _save_index(self):
+        """Salva o índice de bibliotecas e poses"""
+        if not self.index_path:
             return
         
         data = {
-            'version': '1.0',
+            'version': '2.0',
             'project': self.project_path.name if self.project_path else '',
             'updated': datetime.now().isoformat(),
-            'poses': {pose_id: pose.to_dict() for pose_id, pose in self.poses.items()}
+            'libraries': self.libraries,
+            'poses': {pid: p.to_dict() for pid, p in self.poses.items()}
         }
         
         try:
-            with open(self.master_json_path, 'w', encoding='utf-8') as f:
+            with open(self.index_path, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"Erro ao salvar GP Library JSON: {e}")
+            print(f"Erro ao salvar índice: {e}")
     
-    def add_pose_from_current(self, name: str, category: str = 'custom', 
-                            tags: List[str] = None, description: str = ""):
-        """Salva o Grease Pencil selecionado como uma nova pose"""
+    # ======================== SALVAR BIBLIOTECA ========================
+    def save_library(self, library_name: str, description: str = "", 
+                     frames: List[int] = None, overwrite: bool = False) -> Tuple[bool, str]:
+        """
+        Salva o objeto Grease Pencil selecionado como uma biblioteca
+        Pode salvar múltiplos frames como poses separadas
         
+        Args:
+            library_name: Nome da biblioteca (ex: "mao_animations")
+            description: Descrição da biblioteca
+            frames: Lista de frames para salvar (None = todos os frames do objeto)
+            overwrite: Sobrescrever biblioteca existente?
+        """
+        # Verificar objeto selecionado
         if not bpy.context.active_object or bpy.context.active_object.type != 'GREASEPENCIL':
-            return False, "Selecione um objeto Grease Pencil", None
+            return False, "Selecione um objeto Grease Pencil"
         
         gp_object = bpy.context.active_object
-        gp_data = gp_object.data
+        library_filename = f"{library_name}.blend"
+        library_path = self.libraries_path / library_filename
         
-        pose_id = str(uuid.uuid4())
+        # Verificar se já existe
+        if library_path.exists() and not overwrite:
+            return False, f"Biblioteca '{library_name}' já existe. Use overwrite=True para substituir."
         
-        # Coletar informações
-        vertex_groups = [vg.name for vg in gp_object.vertex_groups]
-        layers = [layer.name for layer in gp_data.layers]
+        # Determinar quais frames salvar
+        if frames is None:
+            # Coletar todos os frames de todas as layers
+            frames_set = set()
+            for layer in gp_object.data.layers:
+                for frame in layer.frames:
+                    frames_set.add(frame.frame_number)
+            frames = sorted(list(frames_set))
         
-        # Salvar arquivo .blend da pose
-        blend_filename = f"{pose_id}.blend"
-        blend_path = self.library_path / "drawings" / blend_filename
+        if not frames:
+            return False, "Nenhum frame encontrado no objeto Grease Pencil"
         
-        success = self._save_pose_blend(blend_path, gp_object)
-        if not success:
-            return False, "Erro ao salvar arquivo da pose", None
-        
-        # Gerar thumbnail
-        thumbnail_filename = f"{pose_id}.png"
-        thumbnail_path = self.library_path / "previews" / thumbnail_filename
-        self._generate_thumbnail(gp_object, thumbnail_path)
-        
-        # Criar objeto GPPoseData (sempre objeto, nunca dict!)
-        pose = GPPoseData()
-        pose.id = pose_id
-        pose.name = name
-        pose.category = category
-        pose.tags = tags or []
-        pose.blend_path = str(blend_path.relative_to(self.project_path))
-        pose.data_block_name = gp_data.name
-        pose.thumbnail_path = str(thumbnail_path.relative_to(self.project_path)) if thumbnail_path.exists() else ""
-        pose.vertex_groups = vertex_groups
-        pose.layers = layers
-        pose.created = datetime.now().isoformat()
-        pose.modified = datetime.now().isoformat()
-        pose.description = description
-        
-        self.poses[pose_id] = pose
-        self._save_master_json()
-        
-        return True, f"Pose '{name}' adicionada à biblioteca", pose_id
-
-    def _save_pose_blend(self, blend_path: Path, gp_object):
-        """Salva APENAS o Grease Pencil selecionado em um .blend separado"""
         try:
-            if gp_object.type != 'GREASEPENCIL':
-                print(f"Erro: Objeto {gp_object.name} não é Grease Pencil")
-                return False
+            # Salvar o objeto inteiro como biblioteca .blend
+            success = self._save_blend_library(library_path, gp_object, frames)
+            if not success:
+                return False, "Erro ao salvar arquivo da biblioteca"
             
+            # Registrar biblioteca no índice
+            self.libraries[library_name] = {
+                'filename': library_filename,
+                'path': str(library_path.relative_to(self.project_path)),
+                'description': description,
+                'frames': frames,
+                'created': datetime.now().isoformat(),
+                'modified': datetime.now().isoformat(),
+                'object_name': gp_object.name
+            }
+            
+            # Criar poses para cada frame
+            for frame_number in frames:
+                pose_id = str(uuid.uuid4())
+                pose = GPPose()
+                pose.id = pose_id
+                pose.name = f"{library_name}_frame_{frame_number:03d}"
+                pose.library_name = library_name
+                pose.library_path = str(library_path.relative_to(self.project_path))
+                pose.frame_number = frame_number
+                pose.category = "library"
+                pose.created = datetime.now().isoformat()
+                
+                # Gerar thumbnail para este frame
+                thumbnail_filename = f"{pose_id}.png"
+                thumbnail_path = self.thumbnails_path / thumbnail_filename
+                self._generate_thumbnail_from_library(library_path, frame_number, thumbnail_path)
+                pose.thumbnail_path = str(thumbnail_path.relative_to(self.project_path)) if thumbnail_path.exists() else ""
+                
+                self.poses[pose_id] = pose
+            
+            # Salvar índice
+            self._save_index()
+            
+            return True, f"✅ Biblioteca '{library_name}' salva com {len(frames)} poses!"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False, f"Erro ao salvar biblioteca: {str(e)}"
+
+    def _save_blend_library(self, library_path: Path, gp_object, frames: List[int]) -> bool:
+        """Salva o objeto Grease Pencil como biblioteca .blend - VERSÃO CORRIGIDA"""
+        try:
+            # IMPORTANTE: Salvar usando bpy.ops.wm.save_as_mainfile para biblioteca temporária
+            # Este método garante que todos os dados do Grease Pencil sejam salvos
+            
+            # Guardar estado atual
+            current_filepath = bpy.data.filepath
+            current_scene = bpy.context.scene.name
+            
+            # Criar um arquivo .blend temporário apenas com o objeto Grease Pencil
+            temp_blend = library_path.parent / f"temp_{library_path.name}"
+            
+            # Criar uma cena temporária com apenas o objeto necessário
+            temp_scene = bpy.data.scenes.new("temp_save_scene")
+            
+            # Guardar referência original
+            original_collection = gp_object.users_collection[0] if gp_object.users_collection else None
+            
+            # Mover objeto para cena temporária
+            if original_collection:
+                original_collection.objects.unlink(gp_object)
+            temp_scene.collection.objects.link(gp_object)
+            
+            # Tornar a cena temporária ativa
+            bpy.context.window.scene = temp_scene
+            
+            # Salvar o arquivo .blend com apenas a cena temporária
+            try:
+                # Método 1: Usar save_as_mainfile para garantir que tudo seja salvo
+                bpy.ops.wm.save_as_mainfile(
+                    filepath=str(temp_blend),
+                    copy=True,  # Copiar, não mover
+                    relative_remap=False
+                )
+                
+                # Verificar se o arquivo foi criado
+                if temp_blend.exists():
+                    # Copiar para o destino final
+                    import shutil
+                    shutil.copy2(temp_blend, library_path)
+                    print(f"✅ Biblioteca salva via save_as_mainfile: {library_path}")
+                    success = True
+                else:
+                    success = False
+                    
+            except Exception as e:
+                print(f"⚠️ Erro no save_as_mainfile: {e}")
+                success = False
+            
+            # Restaurar estado
+            if original_collection:
+                temp_scene.collection.objects.unlink(gp_object)
+                original_collection.objects.link(gp_object)
+            
+            # Remover cena temporária
+            bpy.data.scenes.remove(temp_scene)
+            
+            # Restaurar cena original
+            if current_filepath:
+                bpy.ops.wm.open_mainfile(filepath=current_filepath)
+            
+            if success:
+                return True
+            
+            # MÉTODO 2: Fallback - Salvar usando libraries.write com todos os data blocks
+            print("Tentando método alternativo de salvamento...")
+            
+            # Coletar TODOS os data blocks relacionados
             data_blocks = set()
-            data_blocks.add(gp_object)           # objeto
-            data_blocks.add(gp_object.data)      # grease pencil data
             
-            # Materiais
+            # Objeto e seus dados
+            data_blocks.add(gp_object)
+            data_blocks.add(gp_object.data)
+            
+            # Materiais e texturas
             for slot in gp_object.material_slots:
                 if slot.material:
                     data_blocks.add(slot.material)
+                    if hasattr(slot.material, 'node_tree') and slot.material.node_tree:
+                        data_blocks.add(slot.material.node_tree)
             
-            # Paletas e brushes
-            for palette in bpy.data.palettes:
-                data_blocks.add(palette)
+            # Paletas de cores
+            if hasattr(gp_object.data, 'palettes'):
+                for palette in gp_object.data.palettes:
+                    data_blocks.add(palette)
+            
+            # Brushes (se houver referência)
             for brush in bpy.data.brushes:
                 if brush.grease_pencil:
                     data_blocks.add(brush)
             
-            bpy.data.libraries.write(str(blend_path), data_blocks)
+            # Materiais do Grease Pencil (v3)
+            if hasattr(gp_object.data, 'materials'):
+                for material in gp_object.data.materials:
+                    if material:
+                        data_blocks.add(material)
             
-            print(f"✅ Pose salva: {blend_path}")
-            return True
+            # Camadas de pintura (se houver)
+            if hasattr(gp_object.data, 'layers'):
+                for layer in gp_object.data.layers:
+                    # Adicionar informações da layer (algumas podem ser data blocks)
+                    if hasattr(layer, 'mask_layer') and layer.mask_layer:
+                        data_blocks.add(layer.mask_layer)
+            
+            # Salvar usando libraries.write
+            bpy.data.libraries.write(str(library_path), data_blocks, 
+                                    fake_user=True, compress=True, 
+                                    relative_remap=False)
+            
+            # Verificar se o arquivo foi criado e tem tamanho > 0
+            if library_path.exists() and library_path.stat().st_size > 1000:  # > 1KB
+                print(f"✅ Biblioteca salva via libraries.write: {library_path}")
+                return True
+            else:
+                print(f"❌ Arquivo salvo está vazio ou muito pequeno")
+                return False
             
         except Exception as e:
-            print(f"❌ Erro ao salvar pose blend: {e}")
+            print(f"❌ Erro ao salvar biblioteca: {e}")
             import traceback
             traceback.print_exc()
             return False
 
-    def _generate_thumbnail(self, gp_object, thumbnail_path: Path):
-        """Gera thumbnail de forma mais robusta (sem depender do PIL)"""
+    # ======================== APLICAR POSE DA BIBLIOTECA ========================
+    def apply_pose_from_library(self, target_object, pose_id: str) -> Tuple[bool, str]:
+        """
+        Aplica uma pose específica da biblioteca ao objeto alvo
+        Mantém as outras layers/frames intactos
+        """
+        if not target_object or target_object.type != 'GREASEPENCIL':
+            return False, "Objeto alvo deve ser Grease Pencil"
+        
+        pose = self.poses.get(pose_id)
+        if not pose:
+            return False, "Pose não encontrada"
+        
+        library_path = self.project_path / pose.library_path
+        if not library_path.exists():
+            return False, f"Arquivo da biblioteca não encontrado: {library_path}"
+        
         try:
-            # Código simplificado e seguro
+            # Carregar biblioteca temporariamente
+            with bpy.data.libraries.load(str(library_path), link=False, relative=False) as (data_from, data_to):
+                data_to.objects = data_from.objects[:]
+            
+            # Encontrar objeto carregado
+            loaded_obj = next((obj for obj in bpy.data.objects if obj.name in data_from.objects), None)
+            if not loaded_obj:
+                return False, "Não foi possível carregar a biblioteca"
+            
+            current_frame = bpy.context.scene.frame_current
+            
+            # Extrair a pose do frame específico
+            success = self._extract_pose_from_frame(loaded_obj, pose.frame_number, target_object, current_frame)
+            
+            # Limpar objeto temporário
+            bpy.data.objects.remove(loaded_obj, do_unlink=True)
+            
+            if success:
+                return True, f"✅ Pose '{pose.name}' aplicada no frame {current_frame}"
+            else:
+                return False, "Erro ao extrair pose da biblioteca"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False, f"Erro ao aplicar pose: {str(e)}"
+
+    def _extract_pose_from_frame(self, source_obj, source_frame: int,
+                                target_obj, target_frame: int) -> bool:
+        """
+        Extrai pose usando operadores nativos - Com garantia de view layer
+        """
+        try:
+            # ==================== FUNÇÕES AUXILIARES ====================
+            def ensure_in_view_layer(obj):
+                """Garante que o objeto está na view layer (Blender 5.0)"""
+                if obj is None:
+                    return False
+                
+                # Verificar se o objeto está na view layer
+                if obj.name not in bpy.context.view_layer.objects:
+                    print(f"⚠️ Adicionando {obj.name} à view layer")
+                    # Adicionar à coleção da cena
+                    bpy.context.scene.collection.objects.link(obj)
+                    # Forçar atualização da view layer
+                    bpy.context.view_layer.update()
+                
+                return obj.name in bpy.context.view_layer.objects
+            
+            def ensure_edit_mode(obj):
+                """Garante que estamos em modo EDIT com o objeto correto"""
+                # Sair de qualquer modo EDIT
+                if bpy.context.mode == 'EDIT':
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                
+                # Selecionar e ativar o objeto
+                bpy.ops.object.select_all(action='DESELECT')
+                obj.select_set(True)
+                bpy.context.view_layer.objects.active = obj
+                
+                # Entrar em modo EDIT
+                bpy.ops.object.mode_set(mode='EDIT')
+                return True
+            
+            # ==================== PREPARAR OBJETOS ====================
+            # Garantir que ambos os objetos estão na view layer
+            if not ensure_in_view_layer(source_obj):
+                print(f"❌ Não foi possível adicionar {source_obj.name} à view layer")
+                return False
+            
+            if not ensure_in_view_layer(target_obj):
+                print(f"❌ Não foi possível adicionar {target_obj.name} à view layer")
+                return False
+            
+            # Guardar estado original
+            original_active = bpy.context.view_layer.objects.active
+            original_selected = [obj for obj in bpy.context.selected_objects if obj]
+            original_frame = bpy.context.scene.frame_current
+            original_mode = bpy.context.mode
+            
+            try:
+                # ==================== COPIAR DA FONTE ====================
+                # Configurar fonte
+                bpy.ops.object.select_all(action='DESELECT')
+                source_obj.select_set(True)
+                bpy.context.view_layer.objects.active = source_obj
+                
+                # Entrar em modo EDIT
+                if bpy.context.mode != 'EDIT':
+                    bpy.ops.object.mode_set(mode='EDIT')
+                
+                # Ir para o frame
+                bpy.context.scene.frame_set(source_frame)
+                
+                # Selecionar todos os strokes e copiar
+                if bpy.app.version >= (4, 3, 0):
+                    bpy.ops.grease_pencil.select_all(action='SELECT')
+                    bpy.ops.grease_pencil.copy()
+                else:
+                    bpy.ops.gpencil.select_all(action='SELECT')
+                    bpy.ops.gpencil.copy()
+                
+                # ==================== COLAR NO ALVO ====================
+                # Sair do modo EDIT
+                bpy.ops.object.mode_set(mode='OBJECT')
+                
+                # Configurar alvo
+                bpy.ops.object.select_all(action='DESELECT')
+                target_obj.select_set(True)
+                bpy.context.view_layer.objects.active = target_obj
+                
+                # Entrar em modo EDIT
+                bpy.ops.object.mode_set(mode='EDIT')
+                
+                # Ir para o frame alvo
+                bpy.context.scene.frame_set(target_frame)
+                
+                # Limpar frame atual
+                if bpy.app.version >= (4, 3, 0):
+                    bpy.ops.grease_pencil.select_all(action='SELECT')
+                    bpy.ops.grease_pencil.delete()
+                else:
+                    bpy.ops.gpencil.select_all(action='SELECT')
+                    bpy.ops.gpencil.delete(type='STROKES')
+                
+                # Colar
+                if bpy.app.version >= (4, 3, 0):
+                    bpy.ops.grease_pencil.paste()
+                else:
+                    bpy.ops.gpencil.paste()
+                
+                return True
+                
+            finally:
+                # ==================== RESTAURAR ESTADO ====================
+                try:
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                    
+                    # Restaurar seleção
+                    bpy.ops.object.select_all(action='DESELECT')
+                    for obj in original_selected:
+                        if obj and obj.name in bpy.data.objects:
+                            try:
+                                obj.select_set(True)
+                            except:
+                                pass
+                    
+                    if original_active and original_active.name in bpy.data.objects:
+                        try:
+                            bpy.context.view_layer.objects.active = original_active
+                        except:
+                            pass
+                    
+                    bpy.context.scene.frame_set(original_frame)
+                    
+                    # Restaurar modo
+                    if original_mode == 'EDIT':
+                        try:
+                            bpy.ops.object.mode_set(mode='EDIT')
+                        except:
+                            pass
+                except Exception as restore_error:
+                    print(f"Erro ao restaurar: {restore_error}")
+            
+        except Exception as e:
+            print(f"Erro ao extrair pose: {e}")
+            import traceback
+            traceback.print_exc()
+            
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except:
+                pass
+            
+            return False
+
+    # ======================== IMPORTAR BIBLIOTECA EXTERNA ========================
+    def import_library(self, external_blend_path: str, library_name: str = None) -> Tuple[bool, str]:
+        """
+        Importa uma biblioteca externa (.blend) para o projeto atual
+        Permite reutilizar bibliotecas entre projetos
+        
+        Args:
+            external_blend_path: Caminho do arquivo .blend externo
+            library_name: Nome para a biblioteca (se None, usa nome do arquivo)
+        """
+        source_path = Path(external_blend_path)
+        if not source_path.exists():
+            return False, "Arquivo não encontrado"
+        
+        if source_path.suffix.lower() != '.blend':
+            return False, "O arquivo deve ser .blend"
+        
+        # Gerar nome da biblioteca
+        if not library_name:
+            library_name = source_path.stem
+        
+        # Verificar se já existe
+        dest_path = self.libraries_path / f"{library_name}.blend"
+        if dest_path.exists():
+            return False, f"Biblioteca '{library_name}' já existe no projeto"
+        
+        try:
+            # Copiar arquivo
+            shutil.copy2(source_path, dest_path)
+            
+            # Analisar biblioteca para extrair informações das poses
+            frames_info = self._analyze_library_frames(dest_path)
+            
+            # Registrar no índice
+            self.libraries[library_name] = {
+                'filename': f"{library_name}.blend",
+                'path': str(dest_path.relative_to(self.project_path)),
+                'description': f"Importado de {source_path.name}",
+                'frames': frames_info['frames'],
+                'created': datetime.now().isoformat(),
+                'modified': datetime.now().isoformat(),
+                'imported_from': str(source_path),
+                'object_name': frames_info.get('object_name', 'Unknown')
+            }
+            
+            # Criar poses para cada frame
+            for frame_number in frames_info['frames']:
+                pose_id = str(uuid.uuid4())
+                pose = GPPose()
+                pose.id = pose_id
+                pose.name = f"{library_name}_frame_{frame_number:03d}"
+                pose.library_name = library_name
+                pose.library_path = str(dest_path.relative_to(self.project_path))
+                pose.frame_number = frame_number
+                pose.category = "imported"
+                pose.description = f"Importado de {source_path.name}"
+                pose.created = datetime.now().isoformat()
+                
+                # Gerar thumbnail
+                thumbnail_filename = f"{pose_id}.png"
+                thumbnail_path = self.thumbnails_path / thumbnail_filename
+                self._generate_thumbnail_from_library(dest_path, frame_number, thumbnail_path)
+                pose.thumbnail_path = str(thumbnail_path.relative_to(self.project_path)) if thumbnail_path.exists() else ""
+                
+                self.poses[pose_id] = pose
+            
+            # Salvar índice
+            self._save_index()
+            
+            return True, f"✅ Biblioteca '{library_name}' importada com {len(frames_info['frames'])} poses!"
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            return False, f"Erro ao importar biblioteca: {str(e)}"
+    
+    def _analyze_library_frames(self, library_path: Path) -> Dict:
+        """Analisa um arquivo .blend para extrair informações dos frames"""
+        frames_info = {'frames': [], 'object_name': None}
+        
+        try:
+            with bpy.data.libraries.load(str(library_path), link=False) as (data_from, data_to):
+                # Só ler, não carregar realmente
+                if data_from.objects:
+                    frames_info['object_name'] = data_from.objects[0]
+        except:
+            pass
+        
+        # Tentar abrir temporariamente para analisar frames
+        try:
+            with bpy.data.libraries.load(str(library_path), link=True) as (data_from, data_to):
+                if data_from.objects:
+                    # Link temporário para análise
+                    data_to.objects = data_from.objects[:1]
+                    if data_to.objects:
+                        temp_obj = data_to.objects[0]
+                        if temp_obj and temp_obj.type == 'GREASEPENCIL':
+                            # Coletar frames
+                            frames_set = set()
+                            for layer in temp_obj.data.layers:
+                                for frame in layer.frames:
+                                    frames_set.add(frame.frame_number)
+                            frames_info['frames'] = sorted(list(frames_set))
+                            
+                            # Limpar
+                            bpy.data.objects.remove(temp_obj, do_unlink=True)
+        except:
+            pass
+        
+        if not frames_info['frames']:
+            frames_info['frames'] = [1]  # Fallback
+        
+        return frames_info
+    
+    def _generate_thumbnail_from_library(self, library_path: Path, frame_number: int, output_path: Path):
+        """Gera thumbnail de um frame específico da biblioteca"""
+        try:
+            # Carregar biblioteca temporariamente
+            with bpy.data.libraries.load(str(library_path), link=False) as (data_from, data_to):
+                if data_from.objects:
+                    data_to.objects = data_from.objects[:1]
+            
+            if not data_to.objects:
+                return
+            
+            temp_obj = data_to.objects[0]
+            if not temp_obj or temp_obj.type != 'GREASEPENCIL':
+                return
+            
+            # Criar cena temporária para renderizar
             temp_scene = bpy.data.scenes.new("temp_thumb")
             temp_scene.render.engine = 'BLENDER_EEVEE'
             temp_scene.render.resolution_x = GP_LIBRARY_CONFIG['thumbnail_size'][0]
@@ -240,60 +674,80 @@ class GPLibrary:
             temp_scene.render.image_settings.file_format = 'PNG'
             temp_scene.render.film_transparent = True
             
-            # Copiar objeto
-            temp_gp = gp_object.copy()
-            temp_gp.data = gp_object.data.copy()
-            temp_scene.collection.objects.link(temp_gp)
-            
-            # Câmera simples
+            # Configurar câmera
             bpy.ops.object.camera_add(location=(0, -5, 0))
             temp_cam = bpy.context.active_object
-            temp_cam.rotation_euler = (math.radians(90), 0, 0)
+            temp_cam.rotation_euler = (3.14159/2, 0, 0)
             temp_scene.camera = temp_cam
             
-            temp_scene.render.filepath = str(thumbnail_path)
+            # Adicionar objeto à cena
+            temp_scene.collection.objects.link(temp_obj)
+            
+            # Definir frame atual
+            temp_scene.frame_set(frame_number)
+            
+            # Renderizar
+            temp_scene.render.filepath = str(output_path)
             bpy.ops.render.render(write_still=True, scene=temp_scene.name)
             
-            # Limpeza
+            # Limpar
             bpy.data.scenes.remove(temp_scene)
-            bpy.data.objects.remove(temp_gp)
-            bpy.data.objects.remove(temp_cam)
-            
-            print(f"✅ Thumbnail gerado: {thumbnail_path.name}")
+            bpy.data.objects.remove(temp_cam, do_unlink=True)
+            bpy.data.objects.remove(temp_obj, do_unlink=True)
             
         except Exception as e:
-            print(f"⚠️ Não foi possível gerar thumbnail: {e}")
-            # Cria um arquivo vazio só para não quebrar
-            thumbnail_path.parent.mkdir(parents=True, exist_ok=True)
-            thumbnail_path.touch()
-
-    # ======================== MÉTODOS JÁ EXISTENTES ========================
-    def get_poses_by_category(self, category: str = None):
-        if not category:
-            return list(self.poses.values())
-        return [pose for pose in self.poses.values() if pose.category == category]
+            print(f"⚠️ Erro ao gerar thumbnail: {e}")
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            output_path.touch()
     
-    def get_categories_with_poses(self) -> Dict[str, int]:
-        categories = {}
-        for pose in self.poses.values():
-            categories[pose.category] = categories.get(pose.category, 0) + 1
-        return categories
+    # ======================== UTILITÁRIOS ========================
+    def get_libraries(self) -> Dict:
+        """Retorna todas as bibliotecas disponíveis"""
+        return self.libraries
     
-    def swap_pose(self, target_object, pose_id: str):
-        # TODO (futuro): implementar substituição real da pose
-        return True, f"Pose aplicada (em breve)"
-    
-    def delete_pose(self, pose_id: str):
-        if pose_id not in self.poses:
-            return False, "Pose não encontrada"
+    def get_poses(self, library_name: str = None, category: str = None) -> List[GPPose]:
+        """Retorna poses filtradas"""
+        poses = list(self.poses.values())
         
-        pose = self.poses[pose_id]
+        if library_name:
+            poses = [p for p in poses if p.library_name == library_name]
+        
+        if category:
+            poses = [p for p in poses if p.category == category]
+        
+        return poses
+    
+    def delete_library(self, library_name: str) -> Tuple[bool, str]:
+        """Remove uma biblioteca completa"""
+        if library_name not in self.libraries:
+            return False, "Biblioteca não encontrada"
+        
+        library_info = self.libraries[library_name]
+        
         try:
-            (self.project_path / pose.blend_path).unlink(missing_ok=True)
-            (self.project_path / pose.thumbnail_path).unlink(missing_ok=True)
+            # Remover arquivo .blend
+            library_path = self.project_path / library_info['path']
+            if library_path.exists():
+                library_path.unlink()
+            
+            # Remover poses associadas
+            poses_to_delete = [pid for pid, pose in self.poses.items() 
+                              if pose.library_name == library_name]
+            for pid in poses_to_delete:
+                # Remover thumbnail
+                pose = self.poses[pid]
+                if pose.thumbnail_path:
+                    thumb_path = self.project_path / pose.thumbnail_path
+                    thumb_path.unlink(missing_ok=True)
+                del self.poses[pid]
+            
+            # Remover do índice
+            del self.libraries[library_name]
+            
+            # Salvar índice
+            self._save_index()
+            
+            return True, f"✅ Biblioteca '{library_name}' removida"
+            
         except Exception as e:
-            print(f"Erro ao remover arquivos: {e}")
-        
-        del self.poses[pose_id]
-        self._save_master_json()
-        return True, f"Pose '{pose.name}' removida"
+            return False, f"Erro ao remover biblioteca: {str(e)}"
