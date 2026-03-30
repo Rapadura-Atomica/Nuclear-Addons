@@ -162,13 +162,14 @@ class GPLibrary:
         
         # Determinar quais frames salvar
         if frames is None:
-            # Coletar todos os frames de todas as layers
-            frames_set = set()
-            for layer in gp_object.data.layers:
-                for frame in layer.frames:
-                    frames_set.add(frame.frame_number)
-            frames = sorted(list(frames_set))
+                frames_set = set()
+                for layer in gp_object.data.layers:
+                    for frame in layer.frames:
+                        frames_set.add(frame.frame_number)
+                frames = sorted(list(frames_set))
         
+        print(f"📊 Frames encontrados: {frames}")
+
         if not frames:
             return False, "Nenhum frame encontrado no objeto Grease Pencil"
         
@@ -391,49 +392,23 @@ class GPLibrary:
     def _extract_pose_from_frame(self, source_obj, source_frame: int,
                                 target_obj, target_frame: int) -> bool:
         """
-        Extrai pose usando operadores nativos - Com garantia de view layer
+        Extrai a pose de um frame específico - Versão corrigida para Blender 5.0
         """
         try:
-            # ==================== FUNÇÕES AUXILIARES ====================
+            # 🔥 DEBUG: Mostrar qual frame estamos tentando extrair
+            print(f"🎯 Extraindo pose do frame {source_frame} para o frame {target_frame}")
+            
+            # Garantir que os objetos estão na view layer
             def ensure_in_view_layer(obj):
-                """Garante que o objeto está na view layer (Blender 5.0)"""
                 if obj is None:
                     return False
-                
-                # Verificar se o objeto está na view layer
                 if obj.name not in bpy.context.view_layer.objects:
-                    print(f"⚠️ Adicionando {obj.name} à view layer")
-                    # Adicionar à coleção da cena
                     bpy.context.scene.collection.objects.link(obj)
-                    # Forçar atualização da view layer
                     bpy.context.view_layer.update()
-                
                 return obj.name in bpy.context.view_layer.objects
             
-            def ensure_edit_mode(obj):
-                """Garante que estamos em modo EDIT com o objeto correto"""
-                # Sair de qualquer modo EDIT
-                if bpy.context.mode == 'EDIT':
-                    bpy.ops.object.mode_set(mode='OBJECT')
-                
-                # Selecionar e ativar o objeto
-                bpy.ops.object.select_all(action='DESELECT')
-                obj.select_set(True)
-                bpy.context.view_layer.objects.active = obj
-                
-                # Entrar em modo EDIT
-                bpy.ops.object.mode_set(mode='EDIT')
-                return True
-            
-            # ==================== PREPARAR OBJETOS ====================
-            # Garantir que ambos os objetos estão na view layer
-            if not ensure_in_view_layer(source_obj):
-                print(f"❌ Não foi possível adicionar {source_obj.name} à view layer")
-                return False
-            
-            if not ensure_in_view_layer(target_obj):
-                print(f"❌ Não foi possível adicionar {target_obj.name} à view layer")
-                return False
+            ensure_in_view_layer(source_obj)
+            ensure_in_view_layer(target_obj)
             
             # Guardar estado original
             original_active = bpy.context.view_layer.objects.active
@@ -441,89 +416,112 @@ class GPLibrary:
             original_frame = bpy.context.scene.frame_current
             original_mode = bpy.context.mode
             
-            try:
-                # ==================== COPIAR DA FONTE ====================
-                # Configurar fonte
-                bpy.ops.object.select_all(action='DESELECT')
-                source_obj.select_set(True)
-                bpy.context.view_layer.objects.active = source_obj
-                
-                # Entrar em modo EDIT
-                if bpy.context.mode != 'EDIT':
-                    bpy.ops.object.mode_set(mode='EDIT')
-                
-                # Ir para o frame
-                bpy.context.scene.frame_set(source_frame)
-                
-                # Selecionar todos os strokes e copiar
-                if bpy.app.version >= (4, 3, 0):
-                    bpy.ops.grease_pencil.select_all(action='SELECT')
-                    bpy.ops.grease_pencil.copy()
-                else:
-                    bpy.ops.gpencil.select_all(action='SELECT')
-                    bpy.ops.gpencil.copy()
-                
-                # ==================== COLAR NO ALVO ====================
-                # Sair do modo EDIT
+            # ==================== VERIFICAR SE O FRAME EXISTE ====================
+            frame_exists = False
+            for layer in source_obj.data.layers:
+                for frame in layer.frames:
+                    if frame.frame_number == source_frame:
+                        frame_exists = True
+                        print(f"  ✅ Frame {source_frame} encontrado na layer {layer.name}")
+                        break
+                if frame_exists:
+                    break
+            
+            if not frame_exists:
+                print(f"  ❌ Frame {source_frame} NÃO encontrado no objeto fonte!")
+                available_frames = set()
+                for layer in source_obj.data.layers:
+                    for frame in layer.frames:
+                        available_frames.add(frame.frame_number)
+                print(f"  📊 Frames disponíveis: {sorted(available_frames)}")
+                return False
+            
+            # ==================== COPIAR DA FONTE ====================
+            # Sair do modo EDIT se necessário
+            if bpy.context.mode == 'EDIT':
                 bpy.ops.object.mode_set(mode='OBJECT')
-                
-                # Configurar alvo
-                bpy.ops.object.select_all(action='DESELECT')
-                target_obj.select_set(True)
-                bpy.context.view_layer.objects.active = target_obj
-                
-                # Entrar em modo EDIT
-                bpy.ops.object.mode_set(mode='EDIT')
-                
-                # Ir para o frame alvo
-                bpy.context.scene.frame_set(target_frame)
-                
-                # Limpar frame atual
-                if bpy.app.version >= (4, 3, 0):
-                    bpy.ops.grease_pencil.select_all(action='SELECT')
-                    bpy.ops.grease_pencil.delete()
-                else:
-                    bpy.ops.gpencil.select_all(action='SELECT')
-                    bpy.ops.gpencil.delete(type='STROKES')
-                
-                # Colar
-                if bpy.app.version >= (4, 3, 0):
-                    bpy.ops.grease_pencil.paste()
-                else:
-                    bpy.ops.gpencil.paste()
-                
-                return True
-                
-            finally:
-                # ==================== RESTAURAR ESTADO ====================
+            
+            # Deselecionar tudo
+            bpy.ops.object.select_all(action='DESELECT')
+            
+            # Selecionar fonte
+            source_obj.select_set(True)
+            bpy.context.view_layer.objects.active = source_obj
+            
+            # Ir para o frame da fonte
+            bpy.context.scene.frame_set(source_frame)
+            
+            # Entrar em modo EDIT
+            bpy.ops.object.mode_set(mode='EDIT')
+            
+            # Selecionar todos os strokes e copiar
+            if bpy.app.version >= (4, 3, 0):
+                bpy.ops.grease_pencil.select_all(action='SELECT')
+                bpy.ops.grease_pencil.copy()
+            else:
+                bpy.ops.gpencil.select_all(action='SELECT')
+                bpy.ops.gpencil.copy()
+            
+            # ==================== COLAR NO ALVO ====================
+            # Voltar para OBJECT
+            bpy.ops.object.mode_set(mode='OBJECT')
+            
+            # Deselecionar tudo
+            bpy.ops.object.select_all(action='DESELECT')
+            
+            # Selecionar alvo
+            target_obj.select_set(True)
+            bpy.context.view_layer.objects.active = target_obj
+            
+            # Ir para o frame alvo
+            bpy.context.scene.frame_set(target_frame)
+            
+            # Entrar em modo EDIT
+            bpy.ops.object.mode_set(mode='EDIT')
+            
+            # Limpar frame atual
+            if bpy.app.version >= (4, 3, 0):
+                bpy.ops.grease_pencil.select_all(action='SELECT')
+                bpy.ops.grease_pencil.delete()
+            else:
+                bpy.ops.gpencil.select_all(action='SELECT')
+                bpy.ops.gpencil.delete(type='STROKES')
+            
+            # Colar
+            if bpy.app.version >= (4, 3, 0):
+                bpy.ops.grease_pencil.paste()
+            else:
+                bpy.ops.gpencil.paste()
+            
+            # ==================== RESTAURAR ESTADO ====================
+            bpy.ops.object.mode_set(mode='OBJECT')
+            
+            # Restaurar seleção
+            bpy.ops.object.select_all(action='DESELECT')
+            for obj in original_selected:
+                if obj and obj.name in bpy.data.objects:
+                    try:
+                        obj.select_set(True)
+                    except:
+                        pass
+            
+            if original_active and original_active.name in bpy.data.objects:
                 try:
-                    bpy.ops.object.mode_set(mode='OBJECT')
-                    
-                    # Restaurar seleção
-                    bpy.ops.object.select_all(action='DESELECT')
-                    for obj in original_selected:
-                        if obj and obj.name in bpy.data.objects:
-                            try:
-                                obj.select_set(True)
-                            except:
-                                pass
-                    
-                    if original_active and original_active.name in bpy.data.objects:
-                        try:
-                            bpy.context.view_layer.objects.active = original_active
-                        except:
-                            pass
-                    
-                    bpy.context.scene.frame_set(original_frame)
-                    
-                    # Restaurar modo
-                    if original_mode == 'EDIT':
-                        try:
-                            bpy.ops.object.mode_set(mode='EDIT')
-                        except:
-                            pass
-                except Exception as restore_error:
-                    print(f"Erro ao restaurar: {restore_error}")
+                    bpy.context.view_layer.objects.active = original_active
+                except:
+                    pass
+            
+            bpy.context.scene.frame_set(original_frame)
+            
+            # Restaurar modo
+            if original_mode == 'EDIT':
+                try:
+                    bpy.ops.object.mode_set(mode='EDIT')
+                except:
+                    pass
+            
+            print(f"  ✅ Pose do frame {source_frame} aplicada com sucesso!")
+            return True
             
         except Exception as e:
             print(f"Erro ao extrair pose: {e}")
@@ -614,43 +612,50 @@ class GPLibrary:
             return False, f"Erro ao importar biblioteca: {str(e)}"
     
     def _analyze_library_frames(self, library_path: Path) -> Dict:
-        """Analisa um arquivo .blend para extrair informações dos frames"""
+        """Analisa um arquivo .blend para extrair frames - Versão melhorada"""
         frames_info = {'frames': [], 'object_name': None}
         
-        try:
-            with bpy.data.libraries.load(str(library_path), link=False) as (data_from, data_to):
-                # Só ler, não carregar realmente
-                if data_from.objects:
-                    frames_info['object_name'] = data_from.objects[0]
-        except:
-            pass
+        # Salvar estado atual
+        current_filepath = bpy.data.filepath
         
-        # Tentar abrir temporariamente para analisar frames
         try:
-            with bpy.data.libraries.load(str(library_path), link=True) as (data_from, data_to):
-                if data_from.objects:
-                    # Link temporário para análise
-                    data_to.objects = data_from.objects[:1]
-                    if data_to.objects:
-                        temp_obj = data_to.objects[0]
-                        if temp_obj and temp_obj.type == 'GREASEPENCIL':
-                            # Coletar frames
-                            frames_set = set()
-                            for layer in temp_obj.data.layers:
-                                for frame in layer.frames:
-                                    frames_set.add(frame.frame_number)
-                            frames_info['frames'] = sorted(list(frames_set))
-                            
-                            # Limpar
-                            bpy.data.objects.remove(temp_obj, do_unlink=True)
-        except:
-            pass
+            # Abrir a biblioteca temporariamente
+            bpy.ops.wm.open_mainfile(filepath=str(library_path))
+            
+            # Encontrar objeto Grease Pencil
+            for obj in bpy.data.objects:
+                if obj.type == 'GREASEPENCIL':
+                    frames_info['object_name'] = obj.name
+                    
+                    # 🔥 COLETAR TODOS OS FRAMES
+                    frames_set = set()
+                    for layer in obj.data.layers:
+                        for frame in layer.frames:
+                            frames_set.add(frame.frame_number)
+                    
+                    frames_info['frames'] = sorted(list(frames_set))
+                    print(f"📊 Biblioteca '{library_path.stem}': frames encontrados = {frames_info['frames']}")
+                    break
+            
+            # Se não encontrou frames, usar frame 1 como fallback
+            if not frames_info['frames']:
+                print(f"⚠️ Nenhum frame encontrado, usando frame 1 como fallback")
+                frames_info['frames'] = [1]
+                
+        except Exception as e:
+            print(f"Erro ao analisar biblioteca: {e}")
+            frames_info['frames'] = [1]
         
-        if not frames_info['frames']:
-            frames_info['frames'] = [1]  # Fallback
+        finally:
+            # Voltar ao arquivo original
+            if current_filepath:
+                try:
+                    bpy.ops.wm.open_mainfile(filepath=current_filepath)
+                except:
+                    pass
         
         return frames_info
-    
+
     def _generate_thumbnail_from_library(self, library_path: Path, frame_number: int, output_path: Path):
         """Gera thumbnail de um frame específico da biblioteca"""
         try:
