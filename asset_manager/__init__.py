@@ -21,6 +21,7 @@ import math
 from bpy.props import StringProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper
 from bpy.app.handlers import persistent
+from .grease_pencil_ui import register_properties, unregister_properties
 
 from .grease_pencil_operators import (
     GP_OT_save_library,
@@ -28,6 +29,7 @@ from .grease_pencil_operators import (
     GP_OT_refresh_library,
     GP_OT_apply_pose,
     GP_OT_delete_library,
+    GP_OT_generate_all_thumbs,
 )
 from .grease_pencil_ui import (
     GP_PT_library_panel,
@@ -478,21 +480,55 @@ classes = (
     GP_OT_import_library,
     GP_OT_refresh_library,
     GP_OT_delete_library,
+    GP_OT_generate_all_thumbs,
     GP_PT_library_panel,
     GP_PT_library_settings,
 )
+
+# Adicionar propriedades para a UI
+def register_properties():
+    bpy.types.Scene.gp_current_library = bpy.props.StringProperty(
+        name="Current Library",
+        description="Currently selected library",
+        default=""
+    )
+    
+    bpy.types.Scene.gp_thumb_size = bpy.props.IntProperty(
+        name="Thumbnail Size",
+        description="Size of thumbnails in gallery",
+        default=64,
+        min=32,
+        max=256,
+        step=8
+    )
+    
+    bpy.types.Scene.gp_grid_columns = bpy.props.IntProperty(
+        name="Grid Columns",
+        description="Number of columns in gallery grid",
+        default=4,
+        min=2,
+        max=8,
+        step=1
+    )
+
+def unregister_properties():
+    del bpy.types.Scene.gp_current_library
+    del bpy.types.Scene.gp_thumb_size
+    del bpy.types.Scene.gp_grid_columns
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_import)
     bpy.app.handlers.load_post.append(load_handler)
+    register_properties()
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
     bpy.app.handlers.load_post.remove(load_handler)
+    unregister_properties()
 
 if __name__ == "__main__":
     register()

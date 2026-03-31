@@ -1,5 +1,6 @@
 import bpy
 from bpy.props import StringProperty, BoolProperty, EnumProperty, IntVectorProperty
+from .grease_pencil_ui import invalidate_library_previews
 from .grease_pencil_library import GPLibrary
 from typing import Tuple
 
@@ -143,6 +144,86 @@ class GP_OT_import_library(bpy.types.Operator):
         context.window_manager.fileselect_add(self)
         return {'RUNNING_MODAL'}
 
+class GP_OT_generate_all_thumbs(bpy.types.Operator):
+    """Gera thumbnails para todas as poses (um por vez)"""
+    bl_idname = "gp.generate_all_thumbs"
+    bl_label = "Generate All Thumbnails"
+    bl_description = "Generate thumbnails for all poses (one by one)"
+    bl_options = {'REGISTER'}
+    
+    _timer = None
+    _poses = None
+    _current_index = 0
+    _library = None
+    
+    def modal(self, context, event):
+        if event.type == 'TIMER':
+            if self._current_index >= len(self._poses):
+                self.finish(context)
+                return {'FINISHED'}
+            
+            pose = self._poses[self._current_index]
+            print(f"📸 [{self._current_index + 1}/{len(self._poses)}] {pose.name}")
+            
+            library_path = self._library.project_path / pose.library_path
+            if library_path.exists():
+                thumb_filename = f"{pose.id}.png"
+                thumb_path = self._library.thumbnails_path / thumb_filename
+                
+                self._library._generate_thumbnail(library_path, pose.frame_number, thumb_path)
+                
+                if thumb_path.exists():
+                    pose.thumbnail_path = str(thumb_path.relative_to(self._library.project_path))
+                else:
+                    pose.thumbnail_path = ""
+            
+            self._current_index += 1
+            self._library._save_index()
+            
+            # Atualizar UI
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
+        
+        return {'PASS_THROUGH'}
+    
+    def finish(self, context):
+        if self._timer:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        
+        from .grease_pencil_library import invalidate_library_previews
+        invalidate_library_previews()
+        self.report({'INFO'}, f"✅ Generated {len(self._poses)} thumbnails")
+        
+        self._poses = None
+        self._library = None
+        self._current_index = 0
+    
+    def execute(self, context):
+        from .grease_pencil_library import GPLibrary
+        
+        self._library = GPLibrary()
+        
+        if not self._library.poses:
+            self.report({'WARNING'}, "No poses found")
+            return {'CANCELLED'}
+        
+        self._poses = list(self._library.poses.values())
+        self._current_index = 0
+        
+        wm = context.window_manager
+        self._timer = wm.event_timer_add(0.5, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        
+        self.report({'INFO'}, f"📸 Generating {len(self._poses)} thumbnails...")
+        return {'RUNNING_MODAL'}
+    
+    def cancel(self, context):
+        if self._timer:
+            context.window_manager.event_timer_remove(self._timer)
+            self._timer = None
+        self.report({'WARNING'}, "Thumbnail generation cancelled")
 
 class GP_OT_refresh_library(bpy.types.Operator):
     """Atualiza a biblioteca"""
