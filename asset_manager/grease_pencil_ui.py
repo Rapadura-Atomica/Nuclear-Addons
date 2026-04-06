@@ -88,39 +88,39 @@ class GP_PT_library_panel(bpy.types.Panel):
             self.draw_thumbnail(flow, context, pose)
     
     def draw_thumbnail(self, layout, context, pose):
-        """Desenha um thumbnail individual"""
+        """Desenha um thumbnail"""
         
         box = layout.box()
-        library = GPLibrary()
         
-        # ===== THUMBNAIL IMAGEM =====
+        # ===== THUMBNAIL =====
+        library = GPLibrary()
         icon_key = library.get_thumbnail_icon(pose.id, pose.library_name, pose.frame_number)
         
         if icon_key:
             pcoll = get_preview_collection()
             if icon_key in pcoll:
-                # Mostrar thumbnail real
                 box.template_icon(icon_value=pcoll[icon_key].icon_id, scale=5.0)
             else:
-                # Placeholder com botão para gerar
-                row = box.row(align=True)
-                row.label(text=f"Frame {pose.frame_number:03d}", icon='IMAGE')
-                op = row.operator("gp.generate_thumbnail", text="", icon='RENDER_STILL')
-                op.pose_id = pose.id
+                box.label(text=f"Frame {pose.frame_number:03d}", icon='GREASEPENCIL')
         else:
-            # Placeholder com botão para gerar
+            # Placeholder
             row = box.row(align=True)
             row.label(text=f"Frame {pose.frame_number:03d}", icon='IMAGE')
+            
+            # Botão para gerar thumbnail
             op = row.operator("gp.generate_thumbnail", text="", icon='RENDER_STILL')
             op.pose_id = pose.id
         
-        # ===== INFO E BOTÃO DE APLICAR =====
+        # ===== BOTÃO DE APLICAR =====
         row = box.row(align=True)
-        row.label(text=f"{pose.frame_number:03d}", icon='TIME')
         
-        # Botão de aplicar
-        op = row.operator("gp.apply_pose", text="Apply", icon='CHECKMARK')
-        op.pose_id = pose.id
+        # Usar o operador diretamente - sem verificações complexas
+        try:
+            op = row.operator("gp.apply_pose", text="Apply", icon='CHECKMARK')
+            op.pose_id = pose.id
+        except Exception as e:
+            row.label(text=f"Error: {e}", icon='ERROR')
+            print(f"Erro ao criar botão: {e}")
 
 
 class GP_PT_library_settings(bpy.types.Panel):

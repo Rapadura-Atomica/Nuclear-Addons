@@ -16,25 +16,25 @@ class GP_OT_save_library(bpy.types.Operator):
         name="Library Name",
         description="Nome da biblioteca",
         default="my_animation"
-    )
+    ) #type: ignore 
     
     description: StringProperty(
         name="Description",
         description="Descrição da biblioteca",
         default=""
-    )
+    ) #type: ignore
     
     frames: StringProperty(
         name="Frames",
         description="Frames para salvar (ex: 1,2,3 ou 1-10). Deixe em branco para todos",
         default=""
-    )
+    ) #type: ignore 
     
     overwrite: BoolProperty(
         name="Overwrite",
         description="Substituir biblioteca se já existir",
         default=False
-    )
+    ) #type: ignore 
     
     def execute(self, context):
         # Processar frames
@@ -170,7 +170,7 @@ class GP_OT_generate_all_thumbs(bpy.types.Operator):
                 thumb_filename = f"{pose.id}.png"
                 thumb_path = self._library.thumbnails_path / thumb_filename
                 
-                self._library._generate_thumbnail(library_path, pose.frame_number, thumb_path)
+                self._library._generate_thumbnail(pose.frame_number, thumb_path)
                 
                 if thumb_path.exists():
                     pose.thumbnail_path = str(thumb_path.relative_to(self._library.project_path))
@@ -225,6 +225,83 @@ class GP_OT_generate_all_thumbs(bpy.types.Operator):
             self._timer = None
         self.report({'WARNING'}, "Thumbnail generation cancelled")
 
+class GP_OT_generate_thumbnail(bpy.types.Operator):
+    """Gera thumbnail para uma pose específica"""
+    bl_idname = "gp.generate_thumbnail"
+    bl_label = "Generate Thumbnail"
+    bl_description = "Generate thumbnail for this pose"
+    bl_options = {'REGISTER'}
+    
+    pose_id: bpy.props.StringProperty()  #type: ignore
+    
+    def execute(self, context):
+        library = GPLibrary()
+        pose = library.poses.get(self.pose_id)
+        
+        if not pose:
+            self.report({'ERROR'}, "Pose not found")
+            return {'CANCELLED'}
+        
+        library_path = library.project_path / pose.library_path
+        if not library_path.exists():
+            self.report({'ERROR'}, "Library file not found")
+            return {'CANCELLED'}
+        
+        thumb_filename = f"{pose.id}.png"
+        thumb_path = library.thumbnails_path / thumb_filename
+        
+        print(f"📸 Generating thumbnail for {pose.name}")
+        
+        # Usar o método de thumbnail com câmera atual
+        success = library._generate_thumbnail(pose.frame_number, thumb_path)
+        
+        if success and thumb_path.exists():
+            pose.thumbnail_path = str(thumb_path.relative_to(library.project_path))
+            library._save_index()
+            invalidate_library_previews()
+            self.report({'INFO'}, f"Thumbnail generated for {pose.name}")
+        else:
+            self.report({'WARNING'}, f"Failed to generate thumbnail for {pose.name}")
+        
+        # Atualizar UI
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
+class GP_OT_clear_thumbnails(bpy.types.Operator):
+    """Limpa todos os thumbnails da biblioteca"""
+    bl_idname = "gp.clear_thumbnails"
+    bl_label = "Clear Thumbnails"
+    bl_description = "Remove all generated thumbnails"
+    bl_options = {'REGISTER'}
+    
+    def execute(self, context):
+        library = GPLibrary()
+        
+        if not library.thumbnails_path or not library.thumbnails_path.exists():
+            self.report({'WARNING'}, "No thumbnails found")
+            return {'CANCELLED'}
+        
+        thumb_files = list(library.thumbnails_path.glob("*.png"))
+        count = len(thumb_files)
+        
+        for thumb in thumb_files:
+            try:
+                thumb.unlink()
+            except:
+                pass
+        
+        for pose in library.poses.values():
+            pose.thumbnail_path = ""
+        
+        library._save_index()
+        invalidate_library_previews()
+        
+        self.report({'INFO'}, f"Removed {count} thumbnails")
+        return {'FINISHED'}
+
 class GP_OT_refresh_library(bpy.types.Operator):
     """Atualiza a biblioteca"""
     bl_idname = "gp.refresh_library"
@@ -251,7 +328,7 @@ class GP_OT_apply_pose(bpy.types.Operator):
     bl_description = "Substitui o desenho atual pela pose selecionada"
     bl_options = {'REGISTER', 'UNDO'}
     
-    pose_id: bpy.props.StringProperty()  # ← Use bpy.props explicitamente
+    pose_id: bpy.props.StringProperty()  #type: ignore
     
     def execute(self, context):
         library = GPLibrary()

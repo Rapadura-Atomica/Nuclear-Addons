@@ -176,7 +176,6 @@ class GPLibrary:
     def _generate_thumbnail(self, frame_number: int, output_path: Path):
         """
         Gera thumbnail usando a câmera atual do projeto
-        Deve ser chamado ANTES de salvar a biblioteca, enquanto ainda estamos no projeto original
         """
         try:
             scene = bpy.context.scene
@@ -186,14 +185,14 @@ class GPLibrary:
                 print(f"  ❌ Nenhuma câmera encontrada no projeto")
                 return False
             
-            # Salvar frame atual para restaurar depois
+            # Salvar frame atual
             original_frame = scene.frame_current
             
-            # Ir para o frame desejado
+            # Ir para o frame
             scene.frame_set(frame_number)
             bpy.context.view_layer.update()
             
-            # Configurar render para thumbnail
+            # Configurar render
             old_format = scene.render.image_settings.file_format
             old_filepath = scene.render.filepath
             old_res_x = scene.render.resolution_x
@@ -211,24 +210,24 @@ class GPLibrary:
             # Criar diretório
             output_path.parent.mkdir(parents=True, exist_ok=True)
             
-            # Renderizar com a câmera atual
+            # Renderizar
             bpy.ops.render.render(write_still=True)
             
-            # Restaurar configurações
+            # Restaurar
             scene.render.image_settings.file_format = old_format
             scene.render.filepath = old_filepath
             scene.render.resolution_x = old_res_x
             scene.render.resolution_y = old_res_y
             scene.render.film_transparent = old_transparent
             
-            # Restaurar frame original
+            # Restaurar frame
             scene.frame_set(original_frame)
             
             print(f"  ✅ Thumbnail gerado para frame {frame_number}")
             return True
             
         except Exception as e:
-            print(f"  ❌ Erro ao gerar thumbnail para frame {frame_number}: {e}")
+            print(f"  ❌ Erro ao gerar thumbnail: {e}")
             return False
 
     def get_thumbnail_icon(self, pose_id: str, library_name: str, frame_number: int) -> str:
