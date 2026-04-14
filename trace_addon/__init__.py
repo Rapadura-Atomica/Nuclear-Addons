@@ -1,20 +1,20 @@
 # ============================================
 # TRACER PLUS - Addon para Blender 5
-# Usando api_router.py para compatibilidade
+# Usando api_router.py para compatibilidade GPv2/GPv3
+# Foco: Tracing de linhas da imagem para Grease Pencil
 # ============================================
 
 bl_info = {
     "name": "Tracer Plus - Image to Grease Pencil",
     "author": "Seu Nome",
-    "version": (2, 2, 0),
+    "version": (2, 4, 0),
     "blender": (5, 0, 0),
     "location": "3D Viewport > Sidebar > Tracer Plus",
-    "description": "Converte imagens em Grease Pencil strokes com compatibilidade GPv2/GPv3",
+    "description": "Converte linhas de imagens em Grease Pencil strokes",
     "category": "Grease Pencil",
 }
 
 import bpy
-import sys
 import os
 from mathutils import Vector
 from bpy.props import (
@@ -25,14 +25,10 @@ from bpy.types import Panel, Operator, AddonPreferences
 import numpy as np
 from PIL import Image
 
-# Adiciona o diretório do addon ao path se necessário
-# Assumindo que api_router.py está no mesmo diretório
+# Importa o api_router.py (mesmo diretório)
 try:
     from .api_router import (
-        is_gpv3, obj_is_gp, get_gp_modifiers,
-        get_ctx_mode_str, get_obj_mode_str,
-        get_active_layer_index, set_active_layer_index,
-        get_multiedit, set_multiedit,
+        is_gpv3, obj_is_gp,
         get_layer_frame_by_number, is_frame_valid,
         remove_frame, copy_frame, new_active_frame,
         LegacyStrokeCollection, LegacyStrokeRef,
@@ -40,16 +36,13 @@ try:
         register_alternative_api_paths, unregister_alternative_api_paths
     )
 except ImportError:
-    # Fallback para desenvolvimento (api_router.py no mesmo diretório)
+    # Fallback para desenvolvimento
     import importlib.util
     spec = importlib.util.spec_from_file_location("api_router", os.path.join(os.path.dirname(__file__), "api_router.py"))
     api_router = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(api_router)
     from api_router import (
-        is_gpv3, obj_is_gp, get_gp_modifiers,
-        get_ctx_mode_str, get_obj_mode_str,
-        get_active_layer_index, set_active_layer_index,
-        get_multiedit, set_multiedit,
+        is_gpv3, obj_is_gp,
         get_layer_frame_by_number, is_frame_valid,
         remove_frame, copy_frame, new_active_frame,
         LegacyStrokeCollection, LegacyStrokeRef,
@@ -60,10 +53,11 @@ except ImportError:
 # Verifica scikit-image
 try:
     from skimage import measure
+    from scipy import ndimage
     SKIMAGE_AVAILABLE = True
 except ImportError:
     SKIMAGE_AVAILABLE = False
-    print("Tracer Plus: scikit-image não encontrado")
+    print("Tracer Plus: scikit-image e scipy são necessários")
 
 
 # ============================================
@@ -71,7 +65,7 @@ except ImportError:
 # ============================================
 
 def get_or_create_gpencil_material(color_rgb):
-    """Cria ou retorna um material para Grease Pencil"""
+    """Cria ou retorna um material para Grease Pencil - SOMENTE LINHAS"""
     
     hex_color = f"{int(color_rgb[0]*255):02x}{int(color_rgb[1]*255):02x}{int(color_rgb[2]*255):02x}"
     mat_name = f"GP_Trace_{hex_color}"
@@ -85,109 +79,153 @@ def get_or_create_gpencil_material(color_rgb):
     mat = bpy.data.materials.new(name=mat_name)
     mat.use_fake_user = True
     
-    # Configura para Grease Pencil
+    # Configura para Grease Pencil - SOMENTE STROKE (linha)
     if is_gpv3():
         if hasattr(mat, 'grease_pencil') and mat.grease_pencil is not None:
+            # Configura o STROKE (linha)
             mat.grease_pencil.show_stroke = True
             mat.grease_pencil.stroke_color = color_rgb
             mat.grease_pencil.stroke_style = 'SOLID'
-            mat.grease_pencil.show_fill = True
-            mat.grease_pencil.fill_color = (*color_rgb, 0.5)
-            mat.grease_pencil.stroke_thickness = 2
+            mat.grease_pencil.stroke_thickness = 1  # Traço fino
+            
+            # DESATIVA o FILL completamente
+            mat.grease_pencil.show_fill = False
+            mat.grease_pencil.fill_color = (0, 0, 0, 0)  # Transparente
+            
+            # IMPORTANTE: Força o estilo de linha
+            mat.grease_pencil.stroke_image = None
+            mat.grease_pencil.mode = 'LINE'  # Modo linha (se disponível)
     else:
         # GPv2
-        mat.grease_pencil.color = color_rgb
-        mat.grease_pencil.fill_color = (*color_rgb, 0.5)
+        if hasattr(mat, 'grease_pencil'):
+            mat.grease_pencil.color = color_rgb
+            mat.grease_pencil.fill_color = (0, 0, 0, 0)  # Transparente
+            mat.grease_pencil.use_fill = False  # Desativa fill
     
     return mat
 
 
-def quantize_image_robust(image, n_colors=16):
-    """Quantização de cores robusta"""
-    if n_colors >= 256:
-        return image.convert('RGB')
+def simplify_contour_douglas_peucker(contour, tolerance):
+    """Simplifica contorno usando algoritmo Douglas-Peucker - CORRIGIDO"""
+    if len(contour) <= 2:
+        return list(contour)
     
-    if image.mode not in ('RGBA', 'RGB'):
-        image = image.convert('RGBA')
-    elif image.mode == 'RGB':
-        image = image.convert('RGBA')
+    # Encontra ponto com maior distância
+    dmax = 0
+    index = 0
+    end = len(contour) - 1
     
-    for method in [3, 2, 1, 0]:
-        try:
-            quantized = image.quantize(colors=n_colors, method=method)
-            return quantized.convert('RGB')
-        except:
-            continue
+    for i in range(1, end):
+        d = point_line_distance(contour[i], contour[0], contour[end])
+        if d > dmax:
+            index = i
+            dmax = d
     
-    return image.convert('RGB')
+    # Se maior que tolerância, recursão
+    if dmax > tolerance:
+        # Converte para listas para evitar problemas de broadcasting
+        left = list(simplify_contour_douglas_peucker(contour[:index+1], tolerance))
+        right = list(simplify_contour_douglas_peucker(contour[index:], tolerance))
+        # Remove duplicata do meio
+        return left[:-1] + right
+    else:
+        return [list(contour[0]), list(contour[end])]
 
-
-def simplify_contour(contour, factor):
-    """Simplifica o contorno"""
-    if len(contour) < 5:
-        return contour
+def point_line_distance(point, line_start, line_end):
+    """Distância de um ponto a uma linha"""
+    p = np.array(point)
+    ls = np.array(line_start)
+    le = np.array(line_end)
     
-    simplified = [contour[0]]
-    tolerance = factor * 5
+    if np.all(ls == le):
+        return np.linalg.norm(p - ls)
     
-    for i in range(1, len(contour)-1):
-        prev = np.array(simplified[-1])
-        curr = np.array(contour[i])
-        next_pt = np.array(contour[i+1])
-        
-        v1 = curr - prev
-        v2 = next_pt - curr
-        
-        angle1 = np.arctan2(v1[1], v1[0])
-        angle2 = np.arctan2(v2[1], v2[0])
-        angle_diff = abs(angle1 - angle2)
-        
-        if angle_diff > tolerance:
-            simplified.append(contour[i])
+    line_vec = le - ls
+    point_vec = p - ls
+    t = np.dot(point_vec, line_vec) / np.dot(line_vec, line_vec)
     
-    simplified.append(contour[-1])
+    if t < 0:
+        closest = ls
+    elif t > 1:
+        closest = le
+    else:
+        closest = ls + t * line_vec
     
-    if len(simplified) < 3 and len(contour) >= 3:
-        return contour[::max(1, len(contour)//10)]
-    
-    return np.array(simplified)
+    return np.linalg.norm(p - closest)
 
 
 # ============================================
-# OPERADOR PRINCIPAL
+# OPERADOR PRINCIPAL - TRACING
 # ============================================
 
 class GP_OT_trace_image(Operator):
     bl_idname = "gp.trace_image"
     bl_label = "Traçar Imagem"
-    bl_description = "Converte uma imagem para Grease Pencil strokes"
+    bl_description = "Converte as linhas de uma imagem para Grease Pencil strokes"
     bl_options = {'REGISTER', 'UNDO'}
     
     filepath: StringProperty(subtype='FILE_PATH')
-    resolution_scale: FloatProperty(
-        name="Escala de Resolução",
-        default=0.5,
+    
+    # === CONFIGURAÇÕES DE TRACING ===
+    edge_threshold: FloatProperty(
+        name="Sensibilidade",
+        description="Quanto MENOR, MAIS detalhes (0.2 = muitos detalhes, 0.6 = apenas linhas fortes)",
+        default=0.35,
         min=0.1,
         max=1.0
     )
-    color_quantize: IntProperty(
-        name="Quantização de Cores",
-        default=16,
-        min=2,
-        max=64
-    )
     simplify_strokes: FloatProperty(
-        name="Simplificar Strokes",
-        default=0.5,
+        name="Simplificação",
+        description="Remove pontos redundantes (0 = nenhum, 1 = máximo)",
+        default=0.2,
         min=0.0,
         max=1.0
     )
-    close_contours: BoolProperty(
-        name="Fechar Contornos",
-        default=True
+    min_contour_length: IntProperty(
+        name="Contorno Mínimo",
+        description="Ignora contornos menores que este valor (remove ruídos)",
+        default=15,
+        min=1,
+        max=100
+    )
+    
+    # === CONFIGURAÇÕES DE PRÉ-PROCESSAMENTO ===
+    pre_blur: FloatProperty(
+        name="Suavização Prévia",
+        description="Suaviza a imagem antes de detectar bordas (remove ruídos)",
+        default=0.5,
+        min=0.0,
+        max=2.0
+    )
+    contrast_boost: FloatProperty(
+        name="Contraste",
+        description="Aumenta o contraste da imagem (1.0 = normal)",
+        default=1.0,
+        min=0.5,
+        max=2.0
+    )
+    
+    # === CONFIGURAÇÕES DE ESCALA E ROTAÇÃO ===
+    image_scale: FloatProperty(
+        name="Escala",
+        description="Tamanho da imagem na cena",
+        default=0.2,
+        min=0.001,
+        max=0.5
+    )
+    rotation_x: FloatProperty(
+        name="Rotação X",
+        description="Rotação no eixo X (90° = plano 2D)",
+        default=90.0,
+        min=0.0,
+        max=180.0
     )
     
     def execute(self, context):
+        if not SKIMAGE_AVAILABLE:
+            self.report({'ERROR'}, "Instale: pip install scikit-image scipy")
+            return {'CANCELLED'}
+        
         try:
             # Carrega imagem
             if not os.path.exists(self.filepath):
@@ -197,21 +235,51 @@ class GP_OT_trace_image(Operator):
             self.report({'INFO'}, "Carregando imagem...")
             img = Image.open(self.filepath)
             
-            if img.mode != 'RGBA':
-                img = img.convert('RGBA')
+            # Converte para escala de cinza
+            if img.mode != 'L':
+                img = img.convert('L')
             
             original_width, original_height = img.size
             
-            # Redimensiona
-            new_size = (int(img.width * self.resolution_scale), int(img.height * self.resolution_scale))
-            img_resized = img.resize(new_size, Image.Resampling.LANCZOS)
+            # Converte para numpy array
+            img_array = np.array(img).astype(np.float32)
+            img_array = img_array / 255.0
             
-            # Quantiza cores
-            self.report({'INFO'}, f"Quantizando cores ({self.color_quantize} cores)...")
-            img_quantized = quantize_image_robust(img_resized, self.color_quantize)
-            img_array = np.array(img_quantized)
+            # Aplica contraste
+            if self.contrast_boost != 1.0:
+                img_array = (img_array - 0.5) * self.contrast_boost + 0.5
+                img_array = np.clip(img_array, 0, 1)
             
-            # Cria objeto Grease Pencil usando API compatível
+            # Aplica suavização (blur) para reduzir ruído
+            if self.pre_blur > 0:
+                from scipy.ndimage import gaussian_filter
+                img_array = gaussian_filter(img_array, sigma=self.pre_blur)
+            
+            # Detecção de bordas com Sobel
+            self.report({'INFO'}, "Detectando bordas...")
+            edges_x = ndimage.sobel(img_array, axis=0)
+            edges_y = ndimage.sobel(img_array, axis=1)
+            edges = np.hypot(edges_x, edges_y)
+            
+            # Normaliza bordas
+            edges = edges / edges.max() if edges.max() > 0 else edges
+            
+            # Aplica threshold
+            edge_mask = edges > self.edge_threshold
+            
+            self.report({'INFO'}, "Extraindo contornos...")
+            contours = measure.find_contours(edge_mask, 0.5)
+            
+            # Filtra contornos pequenos (ruído)
+            contours = [c for c in contours if len(c) > self.min_contour_length]
+            
+            self.report({'INFO'}, f"Encontrados {len(contours)} contornos")
+            
+            if len(contours) == 0:
+                self.report({'WARNING'}, "Nenhum contorno encontrado. Diminua a 'Sensibilidade'.")
+                return {'CANCELLED'}
+            
+            # Cria objeto Grease Pencil (compatível GPv2/GPv3)
             if is_gpv3():
                 bpy.ops.object.grease_pencil_add(type='EMPTY')
             else:
@@ -220,82 +288,78 @@ class GP_OT_trace_image(Operator):
             gp_obj = context.active_object
             gp_obj.name = "Traced_Image"
             
-            # Acessa dados
+            # === APLICA ROTAÇÃO (X = 90 graus para 2D) ===
+            gp_obj.rotation_euler = (self.rotation_x * 3.14159 / 180, 0, 0)
+            
+            # === APLICA ESCALA (menor tamanho) ===
+            gp_obj.scale = (self.image_scale, self.image_scale, self.image_scale)
+            
+            # Prepara dados
             gp_data = gp_obj.data
             
-            # Cria layer
-            layer = gp_data.layers.new(name="Traces", set_active=True)
+            # Remove layers padrão
+            if hasattr(gp_data.layers, 'clear'):
+                gp_data.layers.clear()
+            else:
+                for layer in list(gp_data.layers):
+                    gp_data.layers.remove(layer)
             
-            # Cria frame
+            # Cria layer
+            layer = gp_data.layers.new(name="Lines", set_active=True)
+            
+            # Cria frame usando api_router
             current_frame = context.scene.frame_current
             frame = new_active_frame(layer.frames, current_frame)
             
             # Acessa strokes via LegacyStrokeCollection (compatível)
-            strokes = frame.nuclear_strokes
+            if hasattr(frame, 'nuclear_strokes'):
+                strokes = frame.nuclear_strokes
+            elif hasattr(frame, 'drawing') and hasattr(frame.drawing, 'strokes'):
+                strokes = frame.drawing.strokes
+            else:
+                strokes = frame.strokes
             
-            # Detecta cores únicas
-            unique_colors = np.unique(img_array.reshape(-1, 3), axis=0)
-            total_colors = len(unique_colors)
+            # Cria material preto
+            material = get_or_create_gpencil_material((0, 0, 0))
+            if material.name not in [m.name for m in gp_obj.data.materials]:
+                gp_obj.data.materials.append(material)
+            material_index = gp_obj.data.materials.find(material.name)
             
-            self.report({'INFO'}, f"Detectando {total_colors} regiões de cor...")
+            # Cria strokes
             stroke_count = 0
+            total_points = 0
             
-            for idx, color in enumerate(unique_colors):
-                if idx % 5 == 0:
-                    self.report({'INFO'}, f"Processando cor {idx+1}/{total_colors}...")
-                
-                # Cria máscara
-                mask = np.all(img_array == color, axis=-1).astype(np.uint8)
-                
-                if np.sum(mask) == 0:
+            for contour in contours:
+                if len(contour) < 3:
                     continue
                 
-                # Extrai contornos
-                if not SKIMAGE_AVAILABLE:
-                    self.report({'WARNING'}, "Instale scikit-image para melhor resultado")
-                    continue
+                # Simplifica contorno
+                points = contour
+                if self.simplify_strokes > 0:
+                    tolerance = self.simplify_strokes * 3
+                    points = simplify_contour_douglas_peucker(contour, tolerance)
                 
-                contours = measure.find_contours(mask, 0.5)
+                # Cria stroke
+                stroke = strokes.new()
+                stroke.material_index = material_index
+                stroke.use_cyclic = False
                 
-                # Cria material
-                color_normalized = color / 255.0
-                material = get_or_create_gpencil_material(color_normalized)
+                # Adiciona pontos
+                for point in points:
+                    x = (point[1] - (original_width / 2)) * 0.01
+                    y = -(point[0] - (original_height / 2)) * 0.01
+                    
+                    stroke.points.add(1)
+                    stroke.points[-1].co = (x, y, 0)
+
+                    stroke.points[-1].pressure = 0.01
+                    stroke.points[-1].radius = 0.01
+                    stroke.points[-1].strength = 1.0
                 
-                if material.name not in [m.name for m in gp_obj.data.materials]:
-                    gp_obj.data.materials.append(material)
+                stroke_count += 1
                 
-                material_index = gp_obj.data.materials.find(material.name)
-                
-                # Cria strokes usando LegacyStrokeCollection
-                for contour in contours:
-                    if len(contour) < 3:
-                        continue
-                    
-                    # Escala
-                    scale_x = original_width / new_size[0]
-                    scale_y = original_height / new_size[1]
-                    contour_scaled = contour.copy()
-                    contour_scaled[:, 0] *= scale_y
-                    contour_scaled[:, 1] *= scale_x
-                    
-                    # Simplifica
-                    if self.simplify_strokes > 0:
-                        contour_scaled = simplify_contour(contour_scaled, self.simplify_strokes)
-                    
-                    # Cria stroke usando API compatível
-                    stroke = strokes.new()
-                    stroke.material_index = material_index
-                    stroke.use_cyclic = self.close_contours
-                    
-                    # Adiciona pontos
-                    for point in contour_scaled:
-                        co = (point[1] - original_width/2, -(point[0] - original_height/2), 0)
-                        stroke.points.add(1)
-                        stroke.points[-1].co = co
-                        stroke.points[-1].pressure = 1.0
-                        stroke.points[-1].strength = 1.0
-                    
-                    stroke_count += 1
+                if stroke_count % 20 == 0:
+                    self.report({'INFO'}, f"Criados {stroke_count} strokes...")
             
             # Insere keyframe se auto-keyframe estiver ativo
             insert_gp_keyframe_if_auto(gp_obj, current_frame)
@@ -312,7 +376,7 @@ class GP_OT_trace_image(Operator):
             
             bpy.ops.view3d.view_all(center=True)
             
-            self.report({'INFO'}, f"Traçado concluído! {stroke_count} strokes criados.")
+            self.report({'INFO'}, f"✅ Tracing concluído! {stroke_count} strokes, {total_points} pontos")
             return {'FINISHED'}
             
         except Exception as e:
@@ -337,7 +401,7 @@ class GP_OT_simplify_strokes(Operator):
     bl_options = {'REGISTER', 'UNDO'}
     
     factor: FloatProperty(
-        name="Fator de Simplificação",
+        name="Fator",
         default=0.5,
         min=0.0,
         max=1.0
@@ -354,86 +418,43 @@ class GP_OT_simplify_strokes(Operator):
         gp_data = obj.data
         
         for layer in gp_data.layers:
-            if layer.lock or layer.hide:
+            if hasattr(layer, 'hide') and layer.hide:
                 continue
             
             for frame in layer.frames:
                 if not is_frame_valid(frame):
                     continue
                 
-                strokes = frame.nuclear_strokes
+                if hasattr(frame, 'nuclear_strokes'):
+                    strokes = frame.nuclear_strokes
+                elif hasattr(frame, 'drawing') and hasattr(frame.drawing, 'strokes'):
+                    strokes = frame.drawing.strokes
+                else:
+                    strokes = frame.strokes
+                
                 for stroke in strokes:
                     if len(stroke.points) <= 3:
                         continue
                     
-                    original_count = len(stroke.points)
-                    self._simplify_stroke(stroke, self.factor)
-                    total_removed += original_count - len(stroke.points)
+                    original = len(stroke.points)
+                    points = [stroke.points[i].co for i in range(len(stroke.points))]
+                    tolerance = self.factor * 10
+                    simplified = simplify_contour_douglas_peucker(points, tolerance)
+                    
+                    while len(stroke.points) > len(simplified):
+                        stroke.points.pop(-1)
+                    
+                    for i, point in enumerate(simplified):
+                        if i < len(stroke.points):
+                            stroke.points[i].co = point
+                        else:
+                            stroke.points.add(1)
+                            stroke.points[-1].co = point
+                    
+                    total_removed += original - len(stroke.points)
         
         self.report({'INFO'}, f"Removidos {total_removed} pontos")
         return {'FINISHED'}
-    
-    def _simplify_stroke(self, stroke, factor):
-        if len(stroke.points) <= 3:
-            return
-        
-        points = [p.co for p in stroke.points]
-        epsilon = factor * 10
-        
-        simplified = self._douglas_peucker(points, epsilon)
-        
-        while len(stroke.points) > len(simplified):
-            stroke.points.pop(-1)
-        
-        for i, point in enumerate(simplified):
-            if i < len(stroke.points):
-                stroke.points[i].co = point
-            else:
-                stroke.points.add(1)
-                stroke.points[-1].co = point
-    
-    def _douglas_peucker(self, points, epsilon):
-        if len(points) <= 2:
-            return points
-        
-        dmax = 0
-        index = 0
-        end = len(points) - 1
-        
-        for i in range(1, end):
-            d = self._perpendicular_distance(points[i], points[0], points[end])
-            if d > dmax:
-                index = i
-                dmax = d
-        
-        if dmax > epsilon:
-            rec_results1 = self._douglas_peucker(points[:index+1], epsilon)
-            rec_results2 = self._douglas_peucker(points[index:], epsilon)
-            return rec_results1[:-1] + rec_results2
-        else:
-            return [points[0], points[end]]
-    
-    def _perpendicular_distance(self, point, line_start, line_end):
-        p = Vector(point)
-        ls = Vector(line_start)
-        le = Vector(line_end)
-        
-        if ls == le:
-            return (p - ls).length
-        
-        line_vec = le - ls
-        point_vec = p - ls
-        
-        t = point_vec.dot(line_vec) / line_vec.dot(line_vec)
-        
-        if t < 0:
-            closest = ls
-        elif t > 1:
-            closest = le
-        else:
-            closest = ls + t * line_vec
-        
-        return (p - closest).length
 
 
 # ============================================
@@ -443,7 +464,7 @@ class GP_OT_simplify_strokes(Operator):
 class GP_OT_clear_traces(Operator):
     bl_idname = "gp.clear_traces"
     bl_label = "Limpar Traços"
-    bl_description = "Remove todos os objetos de trace da cena"
+    bl_description = "Remove todos os objetos de trace"
     bl_options = {'REGISTER', 'UNDO'}
     
     def execute(self, context):
@@ -468,38 +489,58 @@ class GP_PT_tracer_panel(Panel):
     bl_region_type = 'UI'
     bl_category = "Tracer Plus"
     
-    @classmethod
-    def poll(cls, context):
-        return True
-    
     def draw(self, context):
         layout = self.layout
         
+        # Seção principal
         box = layout.box()
-        box.label(text="Traçar Imagem", icon='IMAGE_DATA')
+        box.label(text="Tracing de Imagem", icon='IMAGE_DATA')
         box.operator("gp.trace_image", text="Selecionar Imagem", icon='FILE_IMAGE')
         
+        # Configurações de Tracing
         if context.scene.tracer_show_advanced:
+            box = layout.box()
+            box.label(text="Configurações de Tracing", icon='TOOL_SETTINGS')
             col = box.column(align=True)
-            col.prop(context.scene, "tracer_resolution_scale")
-            col.prop(context.scene, "tracer_color_quantize")
+            col.prop(context.scene, "tracer_edge_threshold")
             col.prop(context.scene, "tracer_simplify_strokes")
-            col.prop(context.scene, "tracer_close_contours")
+            col.prop(context.scene, "tracer_min_contour")
+            
+            box = layout.box()
+            box.label(text="Pré-processamento", icon='IMAGE_ZDEPTH')
+            col = box.column(align=True)
+            col.prop(context.scene, "tracer_pre_blur")
+            col.prop(context.scene, "tracer_contrast_boost")
+            
+            box = layout.box()
+            box.label(text="Transformação", icon='OBJECT_ORIGIN')
+            col = box.column(align=True)
+            col.prop(context.scene, "tracer_image_scale")
+            col.prop(context.scene, "tracer_rotation_x")
         
-        box.prop(context.scene, "tracer_show_advanced", text="Opções Avançadas", icon='SETTINGS')
+        box.prop(context.scene, "tracer_show_advanced", text="Configurações Avançadas", icon='SETTINGS')
         
+        # Ferramentas
         box = layout.box()
         box.label(text="Ferramentas", icon='TOOL_SETTINGS')
-        box.operator("gp.simplify_strokes", text="Simplificar Strokes", icon='MOD_SIMPLIFY')
-        box.operator("gp.clear_traces", text="Limpar Traços", icon='TRASH')
+        box.operator("gp.simplify_strokes", text="Simplificar Selecionados", icon='MOD_SIMPLIFY')
+        box.operator("gp.clear_traces", text="Limpar Todos", icon='TRASH')
         
+        # Dicas
         box = layout.box()
-        box.label(text="Informação", icon='INFO')
+        box.label(text="Dicas para traços mais limpos", icon='INFO')
         col = box.column(align=True)
-        col.label(text=f"Blender: {'GPv3' if is_gpv3() else 'GPv2'}")
-        col.label(text=f"scikit-image: {'✓ OK' if SKIMAGE_AVAILABLE else '✗ Não'}")
-        col.label(text="Resolução 0.5 para rápido")
-        col.label(text="16-32 cores para melhor resultado")
+        col.label(text="• Diminua a SENSIBILIDADE (0.2-0.3)")
+        col.label(text="• Aumente o CONTRASTE (1.5-2.0)")
+        col.label(text="• Use SUAVIZAÇÃO (0.5-1.0)")
+        col.label(text="• Aumente CONTORNO MÍNIMO (15-30)")
+        
+        # Status
+        box = layout.box()
+        box.label(text="Status", icon='CHECKMARK')
+        col = box.column(align=True)
+        col.label(text=f"Modo: {'GPv3' if is_gpv3() else 'GPv2'}")
+        col.label(text=f"scikit-image: {'✓ OK' if SKIMAGE_AVAILABLE else '✗ Faltando'}")
 
 
 # ============================================
@@ -508,13 +549,18 @@ class GP_PT_tracer_panel(Panel):
 
 def register_properties():
     bpy.types.Scene.tracer_show_advanced = BoolProperty(default=False)
-    bpy.types.Scene.tracer_resolution_scale = FloatProperty(default=0.5, min=0.1, max=1.0)
-    bpy.types.Scene.tracer_color_quantize = IntProperty(default=16, min=2, max=64)
-    bpy.types.Scene.tracer_simplify_strokes = FloatProperty(default=0.5, min=0.0, max=1.0)
-    bpy.types.Scene.tracer_close_contours = BoolProperty(default=True)
+    bpy.types.Scene.tracer_edge_threshold = FloatProperty(default=0.35, min=0.1, max=1.0)
+    bpy.types.Scene.tracer_simplify_strokes = FloatProperty(default=0.2, min=0.0, max=1.0)
+    bpy.types.Scene.tracer_min_contour = IntProperty(default=15, min=1, max=100)
+    bpy.types.Scene.tracer_pre_blur = FloatProperty(default=0.5, min=0.0, max=2.0)
+    bpy.types.Scene.tracer_contrast_boost = FloatProperty(default=1.0, min=0.5, max=2.0)
+    bpy.types.Scene.tracer_image_scale = FloatProperty(default=0.02, min=0.001, max=0.5)
+    bpy.types.Scene.tracer_rotation_x = FloatProperty(default=90.0, min=0.0, max=180.0)
 
 def unregister_properties():
-    props = ['tracer_show_advanced', 'tracer_resolution_scale', 'tracer_color_quantize', 'tracer_simplify_strokes', 'tracer_close_contours']
+    props = ['tracer_show_advanced', 'tracer_edge_threshold', 'tracer_simplify_strokes', 
+             'tracer_min_contour', 'tracer_pre_blur', 'tracer_contrast_boost',
+             'tracer_image_scale', 'tracer_rotation_x']
     for prop in props:
         if hasattr(bpy.types.Scene, prop):
             delattr(bpy.types.Scene, prop)
@@ -529,9 +575,8 @@ class TracerPlusPreferences(AddonPreferences):
     
     def draw(self, context):
         layout = self.layout
-        layout.label(text="Tracer Plus v2.2.0")
-        layout.label(text=f"Modo: {'GPv3' if is_gpv3() else 'GPv2'}")
-        layout.label(text="Compatível com Blender 3.0+ até 5.0+")
+        layout.label(text="Tracer Plus v2.4.0")
+        layout.label(text=f"Compatível: {'GPv3' if is_gpv3() else 'GPv2'}")
 
 
 # ============================================
@@ -547,7 +592,6 @@ classes = [
 ]
 
 def register():
-    # Registra APIs alternativas primeiro
     register_alternative_api_paths()
     
     for cls in classes:
@@ -556,9 +600,8 @@ def register():
     register_properties()
     
     print("=" * 50)
-    print("Tracer Plus v2.2.0")
+    print("Tracer Plus v2.4.0")
     print("=" * 50)
-    print("✓ Registrado com sucesso!")
     print(f"✓ Modo: {'GPv3' if is_gpv3() else 'GPv2'}")
     print(f"✓ scikit-image: {'OK' if SKIMAGE_AVAILABLE else 'NÃO'}")
     print("=" * 50)
@@ -568,8 +611,6 @@ def unregister():
         bpy.utils.unregister_class(cls)
     
     unregister_properties()
-    
-    # Remove APIs alternativas
     unregister_alternative_api_paths()
     
     print("Tracer Plus removido!")
