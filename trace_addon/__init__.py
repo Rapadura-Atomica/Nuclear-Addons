@@ -1,9 +1,3 @@
-# ============================================
-# TRACER PLUS - Addon para Blender 5
-# Usando api_router.py para compatibilidade GPv2/GPv3
-# Foco: Tracing de linhas da imagem para Grease Pencil
-# ============================================
-
 bl_info = {
     "name": "Tracer Plus - Image to Grease Pencil",
     "author": "Seu Nome",
@@ -343,6 +337,7 @@ class GP_OT_trace_image(Operator):
                 stroke = strokes.new()
                 stroke.material_index = material_index
                 stroke.use_cyclic = False
+                stroke.display_mode = 'SCREEN'
                 
                 # Adiciona pontos
                 for point in points:
@@ -350,7 +345,8 @@ class GP_OT_trace_image(Operator):
                     y = -(point[0] - (original_height / 2)) * 0.01
                     
                     stroke.points.add(1)
-                    stroke.points[-1].co = (x, y, 0)
+                    # gp_obj.rotation_euler = (0, 0, 0)
+                    stroke.points[-1].co = (x, 0, -y)
 
                     stroke.points[-1].pressure = 0.01
                     stroke.points[-1].radius = 0.01
@@ -376,7 +372,7 @@ class GP_OT_trace_image(Operator):
             
             bpy.ops.view3d.view_all(center=True)
             
-            self.report({'INFO'}, f"✅ Tracing concluído! {stroke_count} strokes, {total_points} pontos")
+            self.report({'INFO'}, f"Tracing concluído! {stroke_count} strokes, {total_points} pontos")
             return {'FINISHED'}
             
         except Exception as e:
