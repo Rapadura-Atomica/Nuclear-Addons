@@ -90,7 +90,7 @@ def register_asset_library(context=None):
         new_lib.import_method = 'APPEND'  # Mudado de 'APPEND_REUSE'
         print(f"Asset Library registrada: {lib_name} → {assets_dir}")
     except Exception as e:
-        print(f"Erro ao registrar library: {e}")
+        print(f"Erro ao registrar library: {e}") 
 
 def create_catalog_definition(project_path):
     assets_dir = project_path / "assets"
@@ -158,16 +158,8 @@ def add_image_as_empty(context, abs_path: str, name_prefix="Ref_"):
         direction = cam.location - empty.location
         direction.normalize()
         
-        # Configuração para ficar voltado para -Y global
-        # -Z do Empty aponta para a direção (para a câmera)
-        # 'Y' como up axis (ou 'Z' se quiser cima no Z global)
-        rot_quat = direction.to_track_quat('-Z', 'Y')
-        empty.rotation_euler = rot_quat.to_euler()
+        empty.rotation_euler = (math.radians(90), 0, 0)
         
-        # Se ainda não estiver exatamente voltado para -Y, força alinhamento extra
-        # Teste com estes ajustes se necessário:
-        # empty.rotation_euler.x += math.radians(180)  # flip vertical
-        # empty.rotation_euler.z += math.radians(180)  # flip horizontal
     else:
         # Sem câmera: posiciona olhando para -Y global (frente padrão)
         empty.location = (0, -5, 0)  # um pouco à frente no -Y
@@ -183,8 +175,8 @@ class ASSETMANAGER_OT_first_save(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.first_save"
     bl_label = "Primeiro Salvamento"
     bl_options = {'REGISTER', 'UNDO'}
-    directory: StringProperty(subtype='DIR_PATH')
-    project_name: StringProperty(default="MeuProjeto")
+    directory: StringProperty(subtype='DIR_PATH') #type: ignore
+    project_name: StringProperty(default="MeuProjeto") #type: ignore
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -228,9 +220,9 @@ class ASSETMANAGER_OT_first_save(bpy.types.Operator, ImportHelper):
 class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.import_asset"
     bl_label = "Importar Asset Organizado"
-    filter_glob: StringProperty(default="*.*", options={'HIDDEN'})
-    auto_organize: BoolProperty(name="Organizar Automaticamente", default=True)
-    pack_images: BoolProperty(name="Pack Imagens Após Importar", default=True)
+    filter_glob: StringProperty(default="*.*", options={'HIDDEN'}) #type: ignore
+    auto_organize: BoolProperty(name="Organizar Automaticamente", default=True) #type: ignore 
+    pack_images: BoolProperty(name="Pack Imagens Após Importar", default=True) #type: ignore
 
     def execute(self, context):
         source = Path(self.filepath)
@@ -339,7 +331,7 @@ class ASSETMANAGER_OT_import_animatic(bpy.types.Operator, ImportHelper):
     bl_label = "Importar Animatic"
     bl_options = {'REGISTER', 'UNDO'}
     filename_ext = ".mp4"
-    filter_glob: StringProperty(default="*.mp4;*.avi;*.mov;*.mkv;*.webm")
+    filter_glob: StringProperty(default="*.mp4;*.avi;*.mov;*.mkv;*.webm") #type: ignore
 
     def execute(self, context):
         source = Path(self.filepath)
@@ -406,8 +398,8 @@ class ASSETMANAGER_OT_duplicate_project(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.duplicate_project"
     bl_label = "Duplicar Projeto (Save As Novo)"
     bl_options = {'REGISTER'}
-    directory: StringProperty(subtype='DIR_PATH')
-    new_project_name: StringProperty(default="Projeto_Copia")
+    directory: StringProperty(subtype='DIR_PATH') #type: ignore 
+    new_project_name: StringProperty(default="Projeto_Copia") #type: ignore 
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
