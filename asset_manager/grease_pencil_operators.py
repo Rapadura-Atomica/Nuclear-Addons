@@ -122,12 +122,12 @@ class GP_OT_import_library(bpy.types.Operator):
     bl_description = "Importa um arquivo .blend de poses para o projeto"
     bl_options = {'REGISTER', 'UNDO'}
     
-    filepath: StringProperty(subtype='FILE_PATH')
+    filepath: StringProperty(subtype='FILE_PATH') # type: ignore
     library_name: StringProperty(
         name="Library Name",
         description="Nome para a biblioteca no projeto",
         default=""
-    )
+    ) # type: ignore
     
     def execute(self, context):
         library = GPLibrary()
@@ -314,7 +314,7 @@ class GP_OT_resync_thumbnails(bpy.types.Operator):
         name="Library",
         description="Specific library to resync (leave empty for all)",
         default=""
-    )
+    ) #type: ignore
     
     def execute(self, context):
         library = GPLibrary()
@@ -418,7 +418,7 @@ class GP_OT_delete_library(bpy.types.Operator):
     bl_description = "Remove esta biblioteca do projeto"
     bl_options = {'REGISTER', 'UNDO'}
     
-    library_name: StringProperty()
+    library_name: StringProperty() #type: ignore
     
     def execute(self, context):
         library = GPLibrary()
