@@ -234,27 +234,46 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
             self.report({'WARNING'}, "Execute 'Primeiro Salvamento' antes")
             return {'CANCELLED'}
         create_catalog_definition(project)
-        category = self.get_category(source)
+        category = 'videos'
         dest_folder = project / "assets" / category
         dest_folder.mkdir(parents=True, exist_ok=True)
         dest = self.unique_path(dest_folder, source.name)
         shutil.copy2(source, dest)
         rel_path = dest.relative_to(project)
         abs_path = str(dest.resolve())
-        self.load_to_blender(dest, rel_path, context, category)
         
-        # Adicionar imagens como Empty de referência
-        ext_lower = source.suffix.lower()
-        if ext_lower in ASSET_CATEGORIES['images'] + ASSET_CATEGORIES['textures']:
-            add_image_as_empty(context, abs_path)
-            self.report({'INFO'}, f"Imagem adicionada como Empty de referência ({5000} frames)")
+        # Empty com imagem (para preview 3D)
+        bpy.ops.object.empty_image_add(filepath=abs_path, location=(0, 0, 0))
+        empty = context.active_object
+        if empty:
+            empty.name = f"Animatic_{source.stem}"
+            empty.rotation_euler = (math.radians(90), 0, 0)
+            if context.scene.camera:
+                cam = context.scene.camera
+                cam_matrix = cam.matrix_world
+                cam_forward = (cam_matrix @ Vector((0, 0, -1))) - cam.location
+                cam_forward.normalize()
+                empty.location = cam.location + (cam_forward * 3.0)
+            else:
+                empty.location = (0, -5, 0)
         
-        if self.pack_images and ext_lower in ASSET_CATEGORIES['textures'] + ASSET_CATEGORIES['images']:
-            for img in bpy.data.images:
-                if img.filepath == bpy.path.relpath(abs_path):
-                    img.pack()
-                    break
-        self.report({'INFO'}, f"Asset importado: //{rel_path} (Catálogo: {CATALOG_MAP.get(category, 'Misc')})")
+        # Import no VSE
+        if not context.scene.sequence_editor:
+            context.scene.sequence_editor_create()
+        strip = context.scene.sequence_editor.sequences.new(
+            name=source.stem,
+            type='MOVIE',
+            filepath=abs_path,
+            channel=2,
+            frame_start=1
+        )
+        
+        # Ajustar duração da cena
+        if strip.frame_final_duration > context.scene.frame_end:
+            context.scene.frame_end = strip.frame_final_duration + 50
+            self.report({'INFO'}, f"Frame end ajustado para {context.scene.frame_end} frames")
+        
+        self.report({'INFO'}, f"Animatic importado: //{rel_path}")
         register_asset_library()
         return {'FINISHED'}
 
@@ -287,17 +306,26 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
             elif ext in ASSET_CATEGORIES['videos']:
                 if not context.scene.sequence_editor:
                     context.scene.sequence_editor_create()
-                strip = context.scene.sequence_editor.sequences.new_movie(
-                    name=abs_path.stem, filepath=str_abs, channel=2, frame_start=1)
-                # Ajustar frame_end da cena para caber o vídeo
-                if strip.frame_final_duration > context.scene.frame_end:
+                
+                bpy.ops.sequencer.movie_strip_add(
+                    filepath=str_abs,
+                    frame_start=1,
+                    channel=2
+                )
+                
+                strip = context.scene.sequence_editor.active_strip
+                if strip and strip.frame_final_duration > context.scene.frame_end:
                     context.scene.frame_end = strip.frame_final_duration + 50
                     print(f"Frame end ajustado para {context.scene.frame_end}")
             elif ext in ASSET_CATEGORIES['audio']:
                 if not context.scene.sequence_editor:
                     context.scene.sequence_editor_create()
-                context.scene.sequence_editor.sequences.new_sound(
-                    name=abs_path.stem, filepath=str_abs, channel=1, frame_start=1)
+                
+                bpy.ops.sequencer.sound_strip_add(
+                    filepath=str_abs,
+                    frame_start=1,
+                    channel=1
+                )
             elif ext == '.blend':
                 with bpy.data.libraries.load(str_abs, link=False) as (data_from, data_to):
                     data_to.objects = data_from.objects
@@ -356,29 +384,34 @@ class ASSETMANAGER_OT_import_animatic(bpy.types.Operator, ImportHelper):
         empty = context.active_object
         if empty:
             empty.name = f"Animatic_{source.stem}"
+            empty.rotation_euler = (math.radians(90), 0, 0)
             if context.scene.camera:
                 cam = context.scene.camera
                 cam_matrix = cam.matrix_world
                 cam_forward = (cam_matrix @ Vector((0, 0, -1))) - cam.location
                 cam_forward.normalize()
                 empty.location = cam.location + (cam_forward * 3.0)
-                direction = cam.location - empty.location
-                direction.normalize()
-                rot_quat = direction.to_track_quat('-Z', '-Y')
-                empty.rotation_euler = rot_quat.to_euler()
-            else:
-                empty.rotation_euler = (math.radians(90), 0, 0)
         
-        # Import no VSE
-        if not context.scene.sequence_editor:
-            context.scene.sequence_editor_create()
-        strip = context.scene.sequence_editor.sequences.new_movie(
-            name=source.stem, filepath=abs_path, channel=2, frame_start=1, sound=True)
-        
-        # Ajustar duração da cena
-        if strip.frame_final_duration > context.scene.frame_end:
-            context.scene.frame_end = strip.frame_final_duration + 50
-            self.report({'INFO'}, f"Frame end ajustado para {context.scene.frame_end} frames")
+            #Import no VSE
+            if not context.scene.sequence_editor:
+                context.scene.sequence_editor_create()
+            
+            # Procura a área do Sequencer para fazer o override
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'SEQUENCE_EDITOR':
+                        # --- NOVO JEITO ---
+                        with context.temp_override(window=window, area=area, screen=window.screen):
+                            bpy.ops.sequencer.movie_strip_add(
+                                filepath=abs_path,
+                                frame_start=1,
+                                channel=1,
+                                sound=True
+                            )
+                        break
+                else:
+                    continue
+                break
         
         self.report({'INFO'}, f"Animatic importado: //{rel_path}")
         register_asset_library()
