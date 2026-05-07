@@ -150,6 +150,20 @@ class GP_PT_library_settings(bpy.types.Panel):
         # ===== AÇÕES =====
         layout.label(text="Thumbnail Actions:", icon='RENDER_STILL')
         
+        # ===== AÇÕES DE SINCRONIZAÇÃO =====
+        layout.separator()
+        layout.label(text="Sync Actions:", icon='FILE_REFRESH')
+        
+        # Botão para ressincronizar thumbnails
+        row = layout.row(align=True)
+        row.operator("gp.resync_thumbnails", text="Resync Thumbnails", icon='UV_SYNC_SELECT')
+        
+        # Botão para sincronizar biblioteca específica
+        current_lib = getattr(context.scene, 'gp_current_library', None)
+        if current_lib and current_lib in library.get_libraries():
+            op = row.operator("gp.resync_thumbnails", text=f"Resync '{current_lib}'", icon='FILE_REFRESH')
+            op.library_name = current_lib
+
         # Botão para gerar todos os thumbnails
         row = layout.row(align=True)
         row.operator("gp.generate_all_thumbs", text="Generate All Thumbnails", icon='RENDER_STILL')

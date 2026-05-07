@@ -170,7 +170,8 @@ class GP_OT_generate_all_thumbs(bpy.types.Operator):
                 thumb_filename = f"{pose.id}.png"
                 thumb_path = self._library.thumbnails_path / thumb_filename
                 
-                self._library._generate_thumbnail(pose.frame_number, thumb_path)
+                # CORREÇÃO AQUI: Passar o objeto pose
+                self._library._generate_thumbnail(pose, thumb_path)
                 
                 if thumb_path.exists():
                     pose.thumbnail_path = str(thumb_path.relative_to(self._library.project_path))
@@ -301,6 +302,65 @@ class GP_OT_clear_thumbnails(bpy.types.Operator):
         
         self.report({'INFO'}, f"Removed {count} thumbnails")
         return {'FINISHED'}
+
+class GP_OT_resync_thumbnails(bpy.types.Operator):
+    """Ressincroniza thumbnails no projeto atual"""
+    bl_idname = "gp.resync_thumbnails"
+    bl_label = "Resync Thumbnails"
+    bl_description = "Reassocia thumbnails às poses no projeto atual"
+    bl_options = {'REGISTER'}
+    
+    library_name: bpy.props.StringProperty(
+        name="Library",
+        description="Specific library to resync (leave empty for all)",
+        default=""
+    )
+    
+    def execute(self, context):
+        library = GPLibrary()
+        
+        if self.library_name:
+            success, message = library.resync_thumbnails(self.library_name)
+        else:
+            success, message = library.resync_thumbnails()
+        
+        if success:
+            self.report({'INFO'}, message)
+        else:
+            self.report({'WARNING'}, message)
+        
+        # Atualizar UI
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+    
+    def invoke(self, context, event):
+        library = GPLibrary()
+        libraries = library.get_libraries()
+        
+        if len(libraries) > 1:
+            # Mostrar opções se houver múltiplas bibliotecas
+            return context.window_manager.invoke_props_dialog(self, width=300)
+        else:
+            return self.execute(context)
+    
+    def draw(self, context):
+        layout = self.layout
+        library = GPLibrary()
+        libraries = library.get_libraries()
+        
+        if libraries:
+            items = [('ALL', "All Libraries", "Resync all libraries")] + \
+                    [(name, name, f"Resync only {name}") for name in libraries.keys()]
+            
+            layout.prop(self, "library_name", text="Library")
+            # Converter para enum na prática
+            layout.label(text="Select library to resync:")
+            for name in libraries.keys():
+                row = layout.row()
+                row.operator("gp.resync_thumbnails", text=f"Resync {name}").library_name = name
 
 class GP_OT_refresh_library(bpy.types.Operator):
     """Atualiza a biblioteca"""
