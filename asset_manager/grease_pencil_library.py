@@ -169,19 +169,20 @@ class GPLibrary:
     # ======================== GERAR THUMBNAIL (APENAS UMA VEZ) ========================
     def generate_thumbnail_for_frame(self, frame_number: int, output_path: Path, gp_object_name: str = None) -> bool:
         """
-        Gera thumbnail para um frame específico (chamado apenas UMA VEZ no projeto fonte)
-        Não requer câmera - usa viewport screenshot
+        Gera thumbnail usando a câmera atual do projeto
+        Renderiza APENAS o que a câmera vê (não a UI)
         """
         try:
             scene = bpy.context.scene
             view_layer = bpy.context.view_layer
             
-            # Salvar estado atual
-            original_frame = scene.frame_current
-            original_selected = bpy.context.selected_objects.copy()
-            original_active = view_layer.objects.active
+            # Verificar se existe câmera
+            if not scene.camera:
+                print(f"  ⚠️ Nenhuma câmera encontrada no projeto")
+                print(f"  💡 Dica: Adicione uma câmera e posicione para enquadrar seu Grease Pencil")
+                return False
             
-            # Encontrar objeto Grease Pencil
+            # Encontrar objeto Grease Pencil (opcional, só para log)
             gp_obj = None
             if gp_object_name:
                 gp_obj = bpy.data.objects.get(gp_object_name)
@@ -192,88 +193,57 @@ class GPLibrary:
                         gp_obj = obj
                         break
             
-            if not gp_obj:
-                print(f"  ❌ Nenhum objeto Grease Pencil encontrado")
-                return False
-            
             # Ir para o frame
+            original_frame = scene.frame_current
             scene.frame_set(frame_number)
+            view_layer.update()
             
-            # Isolar o objeto GP para screenshot
-            bpy.ops.object.select_all(action='DESELECT')
-            gp_obj.select_set(True)
-            view_layer.objects.active = gp_obj
+            # Salvar configurações de render
+            old_res_x = scene.render.resolution_x
+            old_res_y = scene.render.resolution_y
+            old_filepath = scene.render.filepath
+            old_format = scene.render.image_settings.file_format
+            old_transparent = scene.render.film_transparent
             
-            # Configurar viewport para screenshot
-            original_show_overlays = bpy.context.space_data.overlay.show_overlays if bpy.context.space_data else True
-            
-            # Tentar usar viewport render
+            # Configurar para thumbnail
+            scene.render.resolution_x = 256
+            scene.render.resolution_y = 256
+            scene.render.image_settings.file_format = 'PNG'
+            scene.render.film_transparent = True
             output_path.parent.mkdir(parents=True, exist_ok=True)
+            scene.render.filepath = str(output_path)
             
-            # Método alternativo: usar view3d screenshot
-            success = self._take_viewport_screenshot(gp_obj, output_path, frame_number)
+            # Renderizar O QUE A CÂMERA VÊ (viewport render)
+            print(f"    📷 Renderizando thumbnail do frame {frame_number}...")
+            bpy.ops.render.render(write_still=True, use_viewport=True)
             
-            # Restaurar
-            scene.frame_set(original_frame)
-            bpy.ops.object.select_all(action='DESELECT')
-            for obj in original_selected:
-                if obj and obj.name in bpy.data.objects:
-                    obj.select_set(True)
-            if original_active and original_active.name in bpy.data.objects:
-                view_layer.objects.active = original_active
+            # Verificar resultado
+            success = output_path.exists() and output_path.stat().st_size > 1000
             
             if success:
-                print(f"  ✅ Thumbnail gerado para frame {frame_number}")
-                return True
+                print(f"    ✅ Thumbnail gerado: {output_path.name}")
             else:
-                print(f"  ⚠️ Não foi possível gerar thumbnail para frame {frame_number}")
-                return False
-                
+                print(f"    ⚠️ Thumbnail muito pequeno ou vazio")
+            
+            # Restaurar configurações
+            scene.render.resolution_x = old_res_x
+            scene.render.resolution_y = old_res_y
+            scene.render.image_settings.file_format = old_format
+            scene.render.film_transparent = old_transparent
+            scene.render.filepath = old_filepath
+            scene.frame_set(original_frame)
+            
+            return success
+            
         except Exception as e:
             print(f"  ❌ Erro ao gerar thumbnail: {e}")
+            import traceback
+            traceback.print_exc()
             return False
-    
-    def _take_viewport_screenshot(self, obj, output_path: Path, frame_number: int) -> bool:
-        """
-        Tira screenshot da viewport 3D focando no objeto Grease Pencil
-        """
-        try:
-            # Encontrar uma área 3D
-            for area in bpy.context.screen.areas:
-                if area.type == 'VIEW_3D':
-                    # Salvar estado da região
-                    for region in area.regions:
-                        if region.type == 'WINDOW':
-                            # Usar contexto override
-                            with bpy.context.temp_override(area=area, region=region):
-                                # Configurar viewport
-                                space = area.spaces.active
-                                if space:
-                                    # Salvar configurações
-                                    old_shading = space.shading.type
-                                    old_overlays = space.overlay.show_overlays
-                                    
-                                    # Configurar para visualização limpa
-                                    space.shading.type = 'SOLID'
-                                    space.shading.light = 'STUDIO'
-                                    space.overlay.show_overlays = False
-                                    
-                                    # Tentar focar no objeto
-                                    bpy.ops.view3d.view_selected()
-                                    
-                                    # Salvar screenshot
-                                    bpy.ops.screen.screenshot(filepath=str(output_path))
-                                    
-                                    # Restaurar
-                                    space.shading.type = old_shading
-                                    space.overlay.show_overlays = old_overlays
-                                    
-                                    return output_path.exists()
-            return False
-        except Exception as e:
-            print(f"    Erro no screenshot: {e}")
-            return False
-    
+        
+        finally:
+            scene.frame_set(original_frame)
+
     # ======================== SALVAR BIBLIOTECA (CRIA THUMBS UMA VEZ) ========================
     def save_library(self, library_name: str, description: str = "", 
                     frames: List[int] = None, overwrite: bool = False) -> Tuple[bool, str]:
@@ -463,17 +433,41 @@ class GPLibrary:
             thumbs_copied = 0
             source_dir = source_path.parent
             source_thumb_dir = None
-            
-            # Procurar pasta de thumbnails em várias localizações possíveis
-            possible_thumb_dirs = [
-                source_dir / "thumbnails",                        # Junto ao .blend
-                source_dir.parent / "thumbnails",                 # Pasta pai
-                source_dir / "assets" / "grease_pencil" / "thumbnails",  # Estrutura Asset Manager
-                source_dir.parent / "assets" / "grease_pencil" / "thumbnails",
-                Path(bpy.data.filepath).parent / "assets" / "grease_pencil" / "thumbnails" if bpy.data.filepath else None,
-            ]
-            
-            for thumb_dir in possible_thumb_dirs:
+
+            # Busca mais abrangente
+            paths_to_check = []
+
+            # Adicionar caminhos possíveis
+            paths_to_check.append(source_dir / "thumbnails")
+            paths_to_check.append(source_dir.parent / "thumbnails")
+            paths_to_check.append(source_dir / "assets" / "grease_pencil" / "thumbnails")
+            paths_to_check.append(source_dir.parent / "assets" / "grease_pencil" / "thumbnails")
+
+            # Também procurar dentro de qualquer pasta chamada "thumbnails" no mesmo nível
+            for item in source_dir.parent.glob("**/thumbnails"):
+                if item.is_dir():
+                    paths_to_check.append(item)
+
+            # Também verificar se existe um índice JSON que pode indicar onde estão as thumbs
+            index_path = source_dir / "gp_library_index.json"
+            if index_path.exists():
+                try:
+                    with open(index_path, 'r') as f:
+                        index_data = json.load(f)
+                        # Verificar se alguma pose tem thumbnail_path
+                        for pose_data in index_data.get('poses', {}).values():
+                            if 'thumbnail_path' in pose_data and pose_data['thumbnail_path']:
+                                thumb_rel_path = Path(pose_data['thumbnail_path'])
+                                # Tentar resolver caminho absoluto
+                                possible_thumb = source_dir / thumb_rel_path
+                                if possible_thumb.exists():
+                                    paths_to_check.insert(0, possible_thumb.parent)
+                                break
+                except:
+                    pass
+
+            # Verificar cada caminho
+            for thumb_dir in paths_to_check:
                 if thumb_dir and thumb_dir.exists():
                     source_thumb_dir = thumb_dir
                     print(f"📸 Encontrada pasta de thumbs: {source_thumb_dir}")
