@@ -173,23 +173,43 @@ class GPLibrary:
             print(f"Erro ao salvar índice: {e}")
     
     # ======================== GERENCIAMENTO DE THUMBNAILS ========================
-    def _generate_thumbnail(self, frame_number: int, output_path: Path):
+    def _generate_thumbnail(self, pose, output_path: Path) -> bool:
         """
-        Gera thumbnail usando a câmera atual do projeto
+        Gera thumbnail para uma pose específica
         """
+        if not bpy.context.scene.camera:
+            print(f"  ❌ Nenhuma câmera encontrada no projeto")
+            return False
+        
+        # Salvar estado atual
+        original_filepath = bpy.data.filepath
+        library_path = self.project_path / pose.library_path
+        
+        if not library_path.exists():
+            print(f"  ❌ Biblioteca não encontrada: {library_path}")
+            return False
+        
+        temp_load = False
+        
         try:
+            # Se não estamos no arquivo da biblioteca, carregar temporariamente
+            if str(library_path.resolve()) != original_filepath:
+                print(f"  📂 Carregando biblioteca temporariamente...")
+                bpy.ops.wm.open_mainfile(filepath=str(library_path))
+                temp_load = True
+            
             scene = bpy.context.scene
             
-            # Verificar se existe câmera
+            # Verificar câmera novamente após carregar
             if not scene.camera:
-                print(f"  ❌ Nenhuma câmera encontrada no projeto")
+                print(f"  ❌ Biblioteca não tem câmera")
                 return False
             
             # Salvar frame atual
             original_frame = scene.frame_current
             
-            # Ir para o frame
-            scene.frame_set(frame_number)
+            # Ir para o frame da pose
+            scene.frame_set(pose.frame_number)
             bpy.context.view_layer.update()
             
             # Configurar render
@@ -213,7 +233,7 @@ class GPLibrary:
             # Renderizar
             bpy.ops.render.render(write_still=True)
             
-            # Restaurar
+            # Restaurar configurações
             scene.render.image_settings.file_format = old_format
             scene.render.filepath = old_filepath
             scene.render.resolution_x = old_res_x
@@ -223,12 +243,22 @@ class GPLibrary:
             # Restaurar frame
             scene.frame_set(original_frame)
             
-            print(f"  ✅ Thumbnail gerado para frame {frame_number}")
             return True
             
         except Exception as e:
             print(f"  ❌ Erro ao gerar thumbnail: {e}")
+            import traceback
+            traceback.print_exc()
             return False
+            
+        finally:
+            # Restaurar arquivo original se carregamos temporariamente
+            if temp_load and original_filepath:
+                print(f"  📂 Restaurando projeto original...")
+                try:
+                    bpy.ops.wm.open_mainfile(filepath=original_filepath)
+                except:
+                    print(f"  ⚠️ Erro ao restaurar projeto original")
 
     def get_thumbnail_icon(self, pose_id: str, library_name: str, frame_number: int) -> str:
         """
@@ -565,7 +595,9 @@ class GPLibrary:
     
     # ======================== IMPORTAR BIBLIOTECA ========================
     def import_library(self, external_blend_path: str, library_name: str = None) -> Tuple[bool, str]:
-        """Importa uma biblioteca externa para o projeto atual"""
+        """Importa biblioteca completa com todos os thumbnails"""
+        
+        # Verificações iniciais
         if not self.project_path or not self.libraries_path:
             return False, "Nenhum projeto ativo. Use 'Iniciar Projeto' primeiro."
         
@@ -584,25 +616,69 @@ class GPLibrary:
             return False, f"Biblioteca '{library_name}' já existe no projeto"
         
         try:
-            # Copiar arquivo
+            # ===== 1. COPIAR O ARQUIVO .BLEND =====
+            print(f"📄 Copiando biblioteca: {source_path.name}")
             shutil.copy2(source_path, dest_path)
             
-            # Analisar frames
+            # ===== 2. LOCALIZAR PASTA DE THUMBNAILS DA ORIGEM =====
+            # Assumindo estrutura: [projeto_origem]/assets/grease_pencil/thumbnails/
+            source_thumb_dir = source_path.parent.parent / "thumbnails"
+            
+            # Se não encontrar, tentar outros locais comuns
+            if not source_thumb_dir.exists():
+                source_thumb_dir = source_path.parent / "thumbnails"
+            if not source_thumb_dir.exists():
+                source_thumb_dir = source_path.parent.parent.parent / "thumbnails"
+            
+            # ===== 3. COPIAR THUMBNAILS =====
+            thumbnails_copied = 0
+            dest_thumb_dir = self.thumbnails_path
+            dest_thumb_dir.mkdir(parents=True, exist_ok=True)
+            
+            if source_thumb_dir.exists():
+                print(f"📸 Copiando thumbnails de: {source_thumb_dir}")
+                
+                # Copiar TODOS os arquivos .png que podem ser thumbnails
+                for thumb_file in source_thumb_dir.glob("*.png"):
+                    # Verificar se o thumbnail pertence a esta biblioteca
+                    # Por nome do arquivo ou pelo conteúdo
+                    should_copy = False
+                    
+                    # Método 1: Nome contém o nome da biblioteca
+                    if library_name in thumb_file.stem:
+                        should_copy = True
+                    
+                    # Método 2: Nome segue padrão de pose_id (UUID)
+                    elif len(thumb_file.stem) == 36 and '-' in thumb_file.stem:
+                        should_copy = True  # Parece um UUID
+                    
+                    if should_copy:
+                        dest_thumb = dest_thumb_dir / thumb_file.name
+                        shutil.copy2(thumb_file, dest_thumb)
+                        thumbnails_copied += 1
+                        print(f"  ✅ Copiado: {thumb_file.name}")
+            else:
+                print(f"⚠️ Pasta de thumbnails não encontrada na origem")
+            
+            print(f"📸 {thumbnails_copied} thumbnails copiados")
+            
+            # ===== 4. ANALISAR O .BLEND E REGISTRAR =====
             frames_info = self._analyze_library_frames(dest_path)
             
-            # Registrar
+            # Registrar a biblioteca
             self.libraries[library_name] = {
                 'filename': f"{library_name}.blend",
                 'path': str(dest_path.relative_to(self.project_path)),
-                'description': f"Importado de {source_path.name}",
+                'description': f"Importado de {source_path.parent.name}",
                 'frames': frames_info['frames'],
                 'created': datetime.now().isoformat(),
                 'modified': datetime.now().isoformat(),
-                'imported_from': str(source_path),
-                'object_name': frames_info.get('object_name', 'Unknown')
+                'object_name': frames_info.get('object_name', 'Unknown'),
+                'source_project': str(source_path.parent.parent.parent) if source_thumb_dir.exists() else ""
             }
             
-            # Criar poses
+            # ===== 5. CRIAR POSES E VINCULAR THUMBNAILS =====
+            poses_created = 0
             for frame_number in frames_info['frames']:
                 pose_id = str(uuid.uuid4())
                 pose = GPPose()
@@ -612,31 +688,338 @@ class GPLibrary:
                 pose.library_path = str(dest_path.relative_to(self.project_path))
                 pose.frame_number = frame_number
                 pose.category = "imported"
-                pose.description = f"Importado de {source_path.name}"
+                pose.description = f"Importado com {thumbnails_copied} thumbnails"
                 pose.created = datetime.now().isoformat()
                 
-                # Gerar thumbnail
-                thumbnail_filename = f"{pose_id}.png"
-                thumbnail_path = self.thumbnails_path / thumbnail_filename
+                # Tentar encontrar um thumbnail para este frame
+                thumbnail_found = False
                 
-                try:
-                    self._generate_thumbnail(dest_path, frame_number, thumbnail_path)
-                    if thumbnail_path.exists():
-                        pose.thumbnail_path = str(thumbnail_path.relative_to(self.project_path))
-                except:
+                # Procurar por padrões de nome comuns
+                possible_patterns = [
+                    f"{pose_id}.png",                           # UUID
+                    f"{library_name}_frame_{frame_number:03d}.png",  # library_frame_001
+                    f"{library_name}_{frame_number}.png",       # library_1
+                    f"frame_{frame_number:03d}.png",           # frame_001
+                    f"thumb_{frame_number}.png",               # thumb_1
+                    f"{library_name}_pose_{frame_number}.png", # library_pose_1
+                ]
+                
+                for pattern in possible_patterns:
+                    thumb_path = dest_thumb_dir / pattern
+                    if thumb_path.exists():
+                        pose.thumbnail_path = str(thumb_path.relative_to(self.project_path))
+                        thumbnail_found = True
+                        print(f"  ✅ Pose frame {frame_number} vinculada ao thumbnail: {pattern}")
+                        break
+                
+                if not thumbnail_found:
+                    # Tentar qualquer thumbnail que contenha o frame number
+                    for thumb_file in dest_thumb_dir.glob(f"*_{frame_number:03d}*.png"):
+                        pose.thumbnail_path = str(thumb_file.relative_to(self.project_path))
+                        thumbnail_found = True
+                        print(f"  ✅ Pose frame {frame_number} vinculada ao thumbnail: {thumb_file.name}")
+                        break
+                
+                if not thumbnail_found:
+                    print(f"  ⚠️ Pose frame {frame_number} sem thumbnail")
                     pose.thumbnail_path = ""
                 
                 self.poses[pose_id] = pose
+                poses_created += 1
             
+            # ===== 6. SALVAR ÍNDICE =====
             self._save_index()
             
-            return True, f"✅ Biblioteca '{library_name}' importada com {len(frames_info['frames'])} poses!"
+            print(f"\n🔄 Ressincronizando thumbnails no projeto atual...")
+            self.resync_thumbnails(library_name)
+            
+            return True, f"✅ Biblioteca '{library_name}' importada e sincronizada! ({poses_created} poses, {thumbnails_copied} thumbnails)"
+
+            # ===== 7. ATUALIZAR UI =====
+            from .grease_pencil_ui import invalidate_library_previews
+            invalidate_library_previews()
             
         except Exception as e:
             import traceback
             traceback.print_exc()
             return False, f"Erro ao importar biblioteca: {str(e)}"
-    
+
+    def _find_source_project(self, blend_path: Path) -> Optional[Path]:
+        """Encontra o projeto de origem baseado no caminho do arquivo .blend"""
+        
+        # Procurar pela estrutura padronizada: .../assets/grease_pencil/libraries/arquivo.blend
+        current = blend_path.parent
+        
+        # Subir até encontrar a pasta 'assets'
+        for _ in range(5):  # Máximo 5 níveis
+            if current.name == "assets":
+                project_path = current.parent
+                # Verificar se tem project_config.json
+                if (project_path / "project_config.json").exists():
+                    return project_path
+                break
+            current = current.parent
+        
+        # Se não encontrou pela estrutura, procurar o arquivo project_config.json
+        current = blend_path.parent
+        for parent in [current] + list(current.parents):
+            if (parent / "project_config.json").exists():
+                return parent
+        
+        return None
+
+    def _merge_library_from_index(self, index_path: Path, library_name: str, 
+                                dest_blend_path: Path, dest_thumb_dir: Path):
+        """Mescla informações da biblioteca a partir do índice de origem"""
+        
+        try:
+            with open(index_path, 'r', encoding='utf-8') as f:
+                source_index = json.load(f)
+            
+            # Encontrar biblioteca no índice
+            lib_info = source_index.get('libraries', {}).get(library_name)
+            
+            if not lib_info:
+                print(f"  ⚠️ Biblioteca '{library_name}' não encontrada no índice")
+                self._import_library_by_analysis(dest_blend_path, library_name, dest_thumb_dir, 0)
+                return
+            
+            # Registrar biblioteca
+            self.libraries[library_name] = {
+                'filename': f"{library_name}.blend",
+                'path': str(dest_blend_path.relative_to(self.project_path)),
+                'description': lib_info.get('description', f'Importado de {index_path.parent.parent.name}'),
+                'frames': lib_info.get('frames', []),
+                'created': datetime.now().isoformat(),
+                'modified': datetime.now().isoformat(),
+                'imported_from': str(index_path),
+                'original_project': str(index_path.parent.parent.parent),
+                'object_name': lib_info.get('object_name', 'Unknown')
+            }
+            
+            # Importar poses
+            poses_imported = 0
+            for pose_id, pose_data in source_index.get('poses', {}).items():
+                if pose_data.get('library_name') == library_name:
+                    # Criar nova pose com novo UUID
+                    new_pose_id = str(uuid.uuid4())
+                    new_pose = GPPose()
+                    new_pose.id = new_pose_id
+                    new_pose.name = pose_data.get('name', f"{library_name}_pose")
+                    new_pose.library_name = library_name
+                    new_pose.library_path = str(dest_blend_path.relative_to(self.project_path))
+                    new_pose.frame_number = pose_data.get('frame_number', 1)
+                    new_pose.category = pose_data.get('category', 'imported')
+                    new_pose.tags = pose_data.get('tags', [])
+                    new_pose.description = pose_data.get('description', f'Importado de projeto original')
+                    new_pose.created = datetime.now().isoformat()
+                    
+                    # Verificar se o thumbnail foi copiado
+                    old_thumb_name = Path(pose_data.get('thumbnail_path', '')).name
+                    if old_thumb_name and (dest_thumb_dir / old_thumb_name).exists():
+                        new_pose.thumbnail_path = str((dest_thumb_dir / old_thumb_name).relative_to(self.project_path))
+                        print(f"  ✅ Pose {new_pose.name} - thumbnail encontrado")
+                    else:
+                        # Procurar por thumbnail alternativo
+                        possible_thumbs = list(dest_thumb_dir.glob(f"*_{new_pose.frame_number:03d}.png"))
+                        if possible_thumbs:
+                            new_pose.thumbnail_path = str(possible_thumbs[0].relative_to(self.project_path))
+                            print(f"  ✅ Pose {new_pose.name} - thumbnail alternativo encontrado")
+                        else:
+                            new_pose.thumbnail_path = ""
+                            print(f"  ⚠️ Pose {new_pose.name} - sem thumbnail")
+                    
+                    self.poses[new_pose_id] = new_pose
+                    poses_imported += 1
+            
+            print(f"  ✅ {poses_imported} poses importadas do índice")
+            
+        except Exception as e:
+            print(f"  ❌ Erro ao processar índice: {e}")
+            self._import_library_by_analysis(dest_blend_path, library_name, dest_thumb_dir, 0)
+
+    def _import_library_by_analysis(self, dest_blend_path: Path, library_name: str, 
+                                    dest_thumb_dir: Path, existing_thumbs: int):
+        """Fallback: analisar o .blend diretamente se não houver índice"""
+        
+        print(f"  🔍 Analisando arquivo .blend diretamente...")
+        
+        frames_info = self._analyze_library_frames(dest_blend_path)
+        
+        # Registrar biblioteca
+        self.libraries[library_name] = {
+            'filename': f"{library_name}.blend",
+            'path': str(dest_blend_path.relative_to(self.project_path)),
+            'description': f'Importado por análise direta',
+            'frames': frames_info['frames'],
+            'created': datetime.now().isoformat(),
+            'modified': datetime.now().isoformat(),
+            'object_name': frames_info.get('object_name', 'Unknown')
+        }
+        
+        # Criar poses
+        for frame_number in frames_info['frames']:
+            pose_id = str(uuid.uuid4())
+            pose = GPPose()
+            pose.id = pose_id
+            pose.name = f"{library_name}_frame_{frame_number:03d}"
+            pose.library_name = library_name
+            pose.library_path = str(dest_blend_path.relative_to(self.project_path))
+            pose.frame_number = frame_number
+            pose.category = "imported"
+            pose.description = "Importado por análise direta"
+            pose.created = datetime.now().isoformat()
+            
+            # Procurar thumbnail existente
+            possible_thumbs = list(dest_thumb_dir.glob(f"*_{frame_number:03d}.png"))
+            if possible_thumbs:
+                pose.thumbnail_path = str(possible_thumbs[0].relative_to(self.project_path))
+            else:
+                pose.thumbnail_path = ""
+            
+            self.poses[pose_id] = pose
+        
+        print(f"  ✅ {len(frames_info['frames'])} poses criadas por análise")
+
+    def _import_library_only_blend(self, source_path: Path, library_name: str, dest_path: Path) -> Tuple[bool, str]:
+        """Importa apenas o .blend quando não encontra o projeto de origem"""
+        
+        print(f"  ⚠️ Importando apenas .blend (sem thumbnails)")
+        
+        # Copiar apenas o .blend
+        shutil.copy2(source_path, dest_path)
+        
+        # Analisar e criar poses sem thumbnails
+        frames_info = self._analyze_library_frames(dest_path)
+        
+        self.libraries[library_name] = {
+            'filename': f"{library_name}.blend",
+            'path': str(dest_path.relative_to(self.project_path)),
+            'description': f'Importado de {source_path.name} (sem thumbnails)',
+            'frames': frames_info['frames'],
+            'created': datetime.now().isoformat(),
+            'modified': datetime.now().isoformat(),
+            'object_name': frames_info.get('object_name', 'Unknown')
+        }
+        
+        for frame_number in frames_info['frames']:
+            pose_id = str(uuid.uuid4())
+            pose = GPPose()
+            pose.id = pose_id
+            pose.name = f"{library_name}_frame_{frame_number:03d}"
+            pose.library_name = library_name
+            pose.library_path = str(dest_path.relative_to(self.project_path))
+            pose.frame_number = frame_number
+            pose.category = "imported"
+            pose.description = "Importado sem thumbnails"
+            pose.created = datetime.now().isoformat()
+            pose.thumbnail_path = ""
+            
+            self.poses[pose_id] = pose
+        
+        self._save_index()
+        
+        return True, f"⚠️ Biblioteca '{library_name}' importada sem thumbnails ({len(frames_info['frames'])} poses)"
+
+    def resync_thumbnails(self, library_name: str = None) -> Tuple[bool, str]:
+        """
+        Ressincroniza thumbnails no projeto atual
+        - Verifica quais thumbnails existem
+        - Associa cada thumbnail à pose correta
+        - Gera thumbnails faltantes se necessário
+        """
+        if not self.project_path:
+            return False, "Nenhum projeto ativo"
+        
+        # Filtrar poses por biblioteca
+        poses_to_sync = []
+        if library_name:
+            poses_to_sync = [p for p in self.poses.values() if p.library_name == library_name]
+        else:
+            poses_to_sync = list(self.poses.values())
+        
+        if not poses_to_sync:
+            return False, "Nenhuma pose encontrada para sincronizar"
+        
+        print(f"\n🔄 Ressincronizando {len(poses_to_sync)} poses...")
+        
+        thumbnails_found = 0
+        thumbnails_missing = 0
+        thumbnails_repaired = 0
+        
+        for pose in poses_to_sync:
+            # Caminho onde o thumbnail DEVERIA estar
+            expected_thumb_path = self.thumbnails_path / f"{pose.id}.png"
+            
+            # Verificar se o thumbnail existe
+            if expected_thumb_path.exists():
+                # Thumbnail já existe no local correto
+                pose.thumbnail_path = str(expected_thumb_path.relative_to(self.project_path))
+                thumbnails_found += 1
+                print(f"  ✅ {pose.name} - thumbnail OK")
+                
+            else:
+                # Tentar encontrar o thumbnail em outros lugares
+                thumbnail_found = False
+                
+                # Procurar por padrões alternativos
+                library_name_clean = pose.library_name.replace(" ", "_")
+                patterns = [
+                    f"{pose.id}.png",                                    # UUID
+                    f"{library_name_clean}_frame_{pose.frame_number:03d}.png",
+                    f"{library_name_clean}_{pose.frame_number}.png",
+                    f"{pose.name}.png",
+                    f"frame_{pose.frame_number:03d}.png",
+                    f"thumb_{pose.frame_number}.png",
+                    f"pose_{pose.frame_number}.png",
+                    f"*_{pose.frame_number:03d}.png",                    # Qualquer nome com o frame
+                    f"*{pose.frame_number}*.png",                       # Qualquer nome com o número
+                ]
+                
+                for pattern in patterns:
+                    if '*' in pattern:
+                        # Busca com wildcard
+                        matches = list(self.thumbnails_path.glob(pattern))
+                        if matches:
+                            thumb_path = matches[0]
+                            # Renomear para o padrão UUID
+                            new_path = self.thumbnails_path / f"{pose.id}.png"
+                            shutil.move(str(thumb_path), str(new_path))
+                            pose.thumbnail_path = str(new_path.relative_to(self.project_path))
+                            thumbnail_found = True
+                            thumbnails_repaired += 1
+                            print(f"  🔧 {pose.name} - thumbnail renomeado: {thumb_path.name} -> {pose.id}.png")
+                            break
+                    else:
+                        # Busca exata
+                        thumb_path = self.thumbnails_path / pattern
+                        if thumb_path.exists():
+                            # Renomear para o padrão UUID
+                            new_path = self.thumbnails_path / f"{pose.id}.png"
+                            shutil.move(str(thumb_path), str(new_path))
+                            pose.thumbnail_path = str(new_path.relative_to(self.project_path))
+                            thumbnail_found = True
+                            thumbnails_repaired += 1
+                            print(f"  🔧 {pose.name} - thumbnail renomeado: {pattern} -> {pose.id}.png")
+                            break
+                
+                if not thumbnail_found:
+                    thumbnails_missing += 1
+                    pose.thumbnail_path = ""
+                    print(f"  ⚠️ {pose.name} - thumbnail NÃO encontrado (frame {pose.frame_number})")
+        
+        # Salvar índice atualizado
+        self._save_index()
+        
+        # Atualizar UI
+        from .grease_pencil_ui import invalidate_library_previews
+        invalidate_library_previews()
+        
+        message = f"✅ Sincronização concluída! Encontrados: {thumbnails_found}, Reparados: {thumbnails_repaired}, Faltando: {thumbnails_missing}"
+        print(f"\n{message}")
+        
+        return True, message
+
     def _analyze_library_frames(self, library_path: Path) -> Dict:
         """Analisa um arquivo .blend para extrair frames"""
         frames_info = {'frames': [], 'object_name': None}
