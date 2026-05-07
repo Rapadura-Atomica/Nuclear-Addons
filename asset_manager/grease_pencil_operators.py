@@ -16,25 +16,25 @@ class GP_OT_save_library(bpy.types.Operator):
         name="Library Name",
         description="Nome da biblioteca",
         default="my_animation"
-    ) #type: ignore 
+    )
     
     description: StringProperty(
         name="Description",
         description="Descrição da biblioteca",
         default=""
-    ) #type: ignore
+    )
     
     frames: StringProperty(
         name="Frames",
         description="Frames para salvar (ex: 1,2,3 ou 1-10). Deixe em branco para todos",
         default=""
-    ) #type: ignore 
+    )
     
     overwrite: BoolProperty(
         name="Overwrite",
         description="Substituir biblioteca se já existir",
         default=False
-    ) #type: ignore 
+    )
     
     def execute(self, context):
         # Processar frames
@@ -66,10 +66,8 @@ class GP_OT_save_library(bpy.types.Operator):
             return {'CANCELLED'}
     
     def invoke(self, context, event):
-        # Sugerir nome baseado no objeto selecionado
         if context.active_object and context.active_object.type == 'GREASEPENCIL':
             self.library_name = context.active_object.name
-        
         return context.window_manager.invoke_props_dialog(self, width=400)
 
 
@@ -114,20 +112,19 @@ def apply_pose_from_library(self, target_object, pose_id: str) -> Tuple[bool, st
         traceback.print_exc()
         return False, f"Erro ao aplicar pose: {str(e)}"
 
-
 class GP_OT_import_library(bpy.types.Operator):
-    """Importa uma biblioteca externa para o projeto"""
+    """Importa uma biblioteca externa para o projeto (reutiliza thumbs)"""
     bl_idname = "gp.import_library"
     bl_label = "Import Library"
-    bl_description = "Importa um arquivo .blend de poses para o projeto"
+    bl_description = "Importa um arquivo .blend de poses para o projeto (reutiliza thumbs existentes)"
     bl_options = {'REGISTER', 'UNDO'}
     
-    filepath: StringProperty(subtype='FILE_PATH') # type: ignore
+    filepath: StringProperty(subtype='FILE_PATH')
     library_name: StringProperty(
         name="Library Name",
         description="Nome para a biblioteca no projeto",
         default=""
-    ) # type: ignore
+    )
     
     def execute(self, context):
         library = GPLibrary()
@@ -135,6 +132,10 @@ class GP_OT_import_library(bpy.types.Operator):
         
         if success:
             self.report({'INFO'}, message)
+            # Forçar refresh da UI
+            for area in context.screen.areas:
+                if area.type == 'VIEW_3D':
+                    area.tag_redraw()
             return {'FINISHED'}
         else:
             self.report({'ERROR'}, message)
@@ -227,13 +228,13 @@ class GP_OT_generate_all_thumbs(bpy.types.Operator):
         self.report({'WARNING'}, "Thumbnail generation cancelled")
 
 class GP_OT_generate_thumbnail(bpy.types.Operator):
-    """Gera thumbnail para uma pose específica"""
+    """Gera thumbnail para uma pose específica (apenas no projeto fonte)"""
     bl_idname = "gp.generate_thumbnail"
     bl_label = "Generate Thumbnail"
-    bl_description = "Generate thumbnail for this pose"
+    bl_description = "Generate thumbnail for this pose (source project only)"
     bl_options = {'REGISTER'}
     
-    pose_id: bpy.props.StringProperty()  #type: ignore
+    pose_id: StringProperty()
     
     def execute(self, context):
         library = GPLibrary()
@@ -248,13 +249,27 @@ class GP_OT_generate_thumbnail(bpy.types.Operator):
             self.report({'ERROR'}, "Library file not found")
             return {'CANCELLED'}
         
-        thumb_filename = f"{pose.id}.png"
+        # Encontrar o objeto Grease Pencil original
+        library_info = library.libraries.get(pose.library_name, {})
+        gp_object_name = library_info.get('object_name')
+        
+        thumb_filename = f"{pose.library_name}_frame_{pose.frame_number:03d}.png"
         thumb_path = library.thumbnails_path / thumb_filename
+        
+        # Perguntar se quer gerar
+        if thumb_path.exists():
+            result = context.window_manager.invoke_confirm(
+                self,
+                context,
+                message=f"Thumbnail already exists. Overwrite?",
+                title="Generate Thumbnail"
+            )
+            if result == {'CANCELLED'}:
+                return {'CANCELLED'}
         
         print(f"📸 Generating thumbnail for {pose.name}")
         
-        # Usar o método de thumbnail com câmera atual
-        success = library._generate_thumbnail(pose.frame_number, thumb_path)
+        success = library.generate_thumbnail_for_frame(pose.frame_number, thumb_path, gp_object_name)
         
         if success and thumb_path.exists():
             pose.thumbnail_path = str(thumb_path.relative_to(library.project_path))
@@ -264,7 +279,6 @@ class GP_OT_generate_thumbnail(bpy.types.Operator):
         else:
             self.report({'WARNING'}, f"Failed to generate thumbnail for {pose.name}")
         
-        # Atualizar UI
         for area in context.screen.areas:
             if area.type == 'VIEW_3D':
                 area.tag_redraw()
@@ -388,7 +402,7 @@ class GP_OT_apply_pose(bpy.types.Operator):
     bl_description = "Substitui o desenho atual pela pose selecionada"
     bl_options = {'REGISTER', 'UNDO'}
     
-    pose_id: bpy.props.StringProperty()  #type: ignore
+    pose_id: StringProperty()
     
     def execute(self, context):
         library = GPLibrary()
@@ -397,7 +411,6 @@ class GP_OT_apply_pose(bpy.types.Operator):
             self.report({'ERROR'}, "Selecione um objeto Grease Pencil")
             return {'CANCELLED'}
         
-        # Verificar se pose_id foi passada
         if not self.pose_id:
             self.report({'ERROR'}, "Nenhuma pose selecionada")
             return {'CANCELLED'}
@@ -418,13 +431,14 @@ class GP_OT_delete_library(bpy.types.Operator):
     bl_description = "Remove esta biblioteca do projeto"
     bl_options = {'REGISTER', 'UNDO'}
     
-    library_name: StringProperty() #type: ignore
+    library_name: StringProperty()
     
     def execute(self, context):
         library = GPLibrary()
         success, message = library.delete_library(self.library_name)
         
         if success:
+            invalidate_library_previews()
             self.report({'INFO'}, message)
             return {'FINISHED'}
         else:
