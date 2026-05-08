@@ -236,7 +236,7 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
             self.report({'WARNING'}, "Execute 'Primeiro Salvamento' antes")
             return {'CANCELLED'}
         create_catalog_definition(project)
-        category = 'videos'
+        category = self.get_category(source)
         dest_folder = project / "assets" / category
         dest_folder.mkdir(parents=True, exist_ok=True)
         dest = self.unique_path(dest_folder, source.name)
@@ -244,40 +244,70 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
         rel_path = dest.relative_to(project)
         abs_path = str(dest.resolve())
         
-        # Empty com imagem (para preview 3D)
-        bpy.ops.object.empty_image_add(filepath=abs_path, location=(0, 0, 0))
-        empty = context.active_object
-        if empty:
-            empty.name = f"Animatic_{source.stem}"
-            empty.rotation_euler = (math.radians(90), 0, 0)
-            if context.scene.camera:
-                cam = context.scene.camera
-                cam_matrix = cam.matrix_world
-                cam_forward = (cam_matrix @ Vector((0, 0, -1))) - cam.location
-                cam_forward.normalize()
-                empty.location = cam.location + (cam_forward * 3.0)
-            else:
-                empty.location = (0, -5, 0)
+        add_image_as_empty(context, abs_path, f"Asset_{source.stem}")
         
-        # Import no VSE
-        if not context.scene.sequence_editor:
-            context.scene.sequence_editor_create()
-        strip = context.scene.sequence_editor.sequences.new(
-            name=source.stem,
-            type='MOVIE',
-            filepath=abs_path,
-            channel=2,
-            frame_start=1
-        )
+        self.add_to_sequence_editor(context, abs_path, source.stem)
         
-        # Ajustar duração da cena
-        if strip.frame_final_duration > context.scene.frame_end:
-            context.scene.frame_end = strip.frame_final_duration + 50
-            self.report({'INFO'}, f"Frame end ajustado para {context.scene.frame_end} frames")
-        
-        self.report({'INFO'}, f"Animatic importado: //{rel_path}")
+        self.report({'INFO'}, f"Asset importado: //{rel_path}")
         register_asset_library()
         return {'FINISHED'}
+
+    def add_to_sequence_editor(self, context, abs_path: str, name: str):
+        """Adiciona arquivo ao Sequence Editor com tratamento de erro"""
+        try:
+            # Garantir que o sequence editor existe
+            if not context.scene.sequence_editor:
+                context.scene.sequence_editor_create()
+            
+            seq_editor = context.scene.sequence_editor
+            
+            # Blender 5.0+ usa sequences.all
+            if hasattr(seq_editor, 'sequences_all'):
+                sequences = seq_editor.sequences_all
+            elif hasattr(seq_editor, 'sequences'):
+                sequences = seq_editor.sequences
+            else:
+                print("⚠️ Não foi possível acessar sequences do VSE")
+                return
+            
+            # Adicionar strip dependendo do tipo de arquivo
+            ext = Path(abs_path).suffix.lower()
+            
+            if ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv']:
+                # Vídeo
+                bpy.ops.sequencer.movie_strip_add(
+                    filepath=abs_path,
+                    frame_start=context.scene.frame_current,
+                    channel=2
+                )
+                self.report({'INFO'}, f"Vídeo adicionado ao VSE: {name}")
+                
+            elif ext in ['.wav', '.mp3', '.ogg', '.flac', '.aac']:
+                # Áudio
+                bpy.ops.sequencer.sound_strip_add(
+                    filepath=abs_path,
+                    frame_start=context.scene.frame_current,
+                    channel=1
+                )
+                self.report({'INFO'}, f"Áudio adicionado ao VSE: {name}")
+            
+            # Ajustar duração da cena se necessário
+            if hasattr(seq_editor, 'strips'):
+                strips = seq_editor.strips
+            elif hasattr(seq_editor, 'sequences'):
+                strips = seq_editor.sequences
+            else:
+                strips = []
+            
+            for strip in strips:
+                if hasattr(strip, 'frame_final_duration'):
+                    end_frame = strip.frame_start + strip.frame_final_duration
+                    if end_frame > context.scene.frame_end:
+                        context.scene.frame_end = end_frame + 50
+                        
+        except Exception as e:
+            self.report({'WARNING'}, f"Não foi possível adicionar ao VSE: {str(e)}")
+            print(f"Erro no VSE: {e}")
 
     def get_category(self, path):
         ext = path.suffix.lower()
@@ -295,66 +325,6 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
         while (folder / f"{stem}_{i:03d}{ext}").exists():
             i += 1
         return folder / f"{stem}_{i:03d}{ext}"
-
-    def load_to_blender(self, abs_path: Path, rel_path: Path, context, category: str):
-        ext = abs_path.suffix.lower()
-        str_abs = str(abs_path)
-        catalog_name = CATALOG_MAP.get(category, 'Misc')
-        try:
-            if ext in ASSET_CATEGORIES['textures'] + ASSET_CATEGORIES['images'] + ASSET_CATEGORIES['hdris']:
-                img = bpy.data.images.load(str_abs, check_existing=True)
-                img.filepath = bpy.path.relpath(str_abs)
-                img.name = abs_path.stem
-            elif ext in ASSET_CATEGORIES['videos']:
-                if not context.scene.sequence_editor:
-                    context.scene.sequence_editor_create()
-                
-                bpy.ops.sequencer.movie_strip_add(
-                    filepath=str_abs,
-                    frame_start=1,
-                    channel=2
-                )
-                
-                strip = context.scene.sequence_editor.active_strip
-                if strip and strip.frame_final_duration > context.scene.frame_end:
-                    context.scene.frame_end = strip.frame_final_duration + 50
-                    print(f"Frame end ajustado para {context.scene.frame_end}")
-            elif ext in ASSET_CATEGORIES['audio']:
-                if not context.scene.sequence_editor:
-                    context.scene.sequence_editor_create()
-                
-                bpy.ops.sequencer.sound_strip_add(
-                    filepath=str_abs,
-                    frame_start=1,
-                    channel=1
-                )
-            elif ext == '.blend':
-                with bpy.data.libraries.load(str_abs, link=False) as (data_from, data_to):
-                    data_to.objects = data_from.objects
-                    data_to.materials = data_from.materials
-                    data_to.collections = data_from.collections
-                for datatype in [bpy.data.objects, bpy.data.materials, bpy.data.collections]:
-                    for item in datatype:
-                        if item.library and item.asset_data:
-                            item.asset_mark()
-                            item.asset_data.catalog_id = self.get_catalog_uuid(catalog_name)
-            else:
-                self.report({'WARNING'}, f"Tipo não suportado para importação automática: {ext}")
-        except Exception as e:
-            self.report({'ERROR'}, f"Erro ao carregar {ext.upper()}: {str(e)}")
-
-    def get_catalog_uuid(self, catalog_name: str):
-        project = find_project_path()
-        if not project:
-            return ""
-        cdf_path = project / "assets" / "blender_assets.cdf"
-        if not cdf_path.exists():
-            return ""
-        with open(cdf_path, 'r') as f:
-            for line in f:
-                if ':' in line and line.split(':')[1].strip() == catalog_name:
-                    return line.split(':')[0].strip()
-        return ""
 
 class ASSETMANAGER_OT_import_animatic(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.import_animatic"
