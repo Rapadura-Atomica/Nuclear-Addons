@@ -285,6 +285,52 @@ class GP_OT_generate_thumbnail(bpy.types.Operator):
         
         return {'FINISHED'}
 
+class GP_OT_generate_library_thumbs(bpy.types.Operator):
+    """Gera thumbnails para todas as poses da biblioteca atual"""
+    bl_idname = "gp.generate_library_thumbs"
+    bl_label = "Generate All Thumbnails for Library"
+    bl_description = "Generate thumbnails for all poses in current library"
+    bl_options = {'REGISTER'}
+    
+    def execute(self, context):
+        library = GPLibrary()
+        current_lib = getattr(context.scene, 'gp_current_library', None)
+        
+        if not current_lib:
+            self.report({'WARNING'}, "No library selected")
+            return {'CANCELLED'}
+        
+        poses = library.get_poses(library_name=current_lib)
+        
+        if not poses:
+            self.report({'WARNING'}, f"No poses found in '{current_lib}'")
+            return {'CANCELLED'}
+        
+        library_info = library.libraries.get(current_lib, {})
+        gp_object_name = library_info.get('object_name')
+        
+        success_count = 0
+        for pose in poses:
+            thumb_filename = f"{current_lib}_frame_{pose.frame_number:03d}.png"
+            thumb_path = library.thumbnails_path / thumb_filename
+            
+            if not thumb_path.exists():
+                success = library.generate_thumbnail_for_frame(pose.frame_number, thumb_path, gp_object_name)
+                if success:
+                    pose.thumbnail_path = str(thumb_path.relative_to(library.project_path))
+                    success_count += 1
+        
+        library._save_index()
+        invalidate_library_previews()
+        
+        self.report({'INFO'}, f"Generated {success_count}/{len(poses)} thumbnails")
+        
+        for area in context.screen.areas:
+            if area.type == 'VIEW_3D':
+                area.tag_redraw()
+        
+        return {'FINISHED'}
+
 class GP_OT_clear_thumbnails(bpy.types.Operator):
     """Limpa todos os thumbnails da biblioteca"""
     bl_idname = "gp.clear_thumbnails"

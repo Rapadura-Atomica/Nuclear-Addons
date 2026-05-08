@@ -31,6 +31,8 @@ from .grease_pencil_operators import (
     GP_OT_delete_library,
     GP_OT_generate_all_thumbs,
     GP_OT_clear_thumbnails,
+    GP_OT_resync_thumbnails,
+    GP_OT_generate_library_thumbs,
     GP_OT_generate_thumbnail, 
 )
 from .grease_pencil_ui import (
@@ -503,15 +505,17 @@ classes = (
     ASSETMANAGER_OT_duplicate_project,
     ASSETMANAGER_PT_main,
     GP_OT_save_library,
-    GP_OT_apply_pose,
     GP_OT_import_library,
-    GP_OT_refresh_library,
-    GP_OT_delete_library,
     GP_OT_generate_all_thumbs,
-    GP_OT_clear_thumbnails,
     GP_OT_generate_thumbnail,      # ← ADICIONAR
+    GP_OT_generate_library_thumbs,
     GP_PT_library_panel,
     GP_PT_library_settings,
+    GP_OT_clear_thumbnails,
+    GP_OT_resync_thumbnails,
+    GP_OT_refresh_library,
+    GP_OT_apply_pose,
+    GP_OT_delete_library,
 )
 
 # Adicionar propriedades para a UI
