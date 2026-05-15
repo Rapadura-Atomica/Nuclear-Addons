@@ -291,7 +291,7 @@ class GP_OT_generate_library_thumbs(bpy.types.Operator):
     bl_label = "Generate All Thumbnails for Library"
     bl_description = "Generate thumbnails for all poses in current library"
     bl_options = {'REGISTER'}
-    
+
     def execute(self, context):
         library = GPLibrary()
         current_lib = getattr(context.scene, 'gp_current_library', None)

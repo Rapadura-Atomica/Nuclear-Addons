@@ -42,7 +42,7 @@ class GP_OT_save_stamp(bpy.types.Operator):
         name="Stamp Name",
         description="Nome do carimbo",
         default="MyStamp"
-    )
+    ) #type: ignore
 
     def execute(self, context):
         obj = context.active_object
@@ -184,7 +184,7 @@ class GP_OT_apply_stamp(bpy.types.Operator):
     bl_label = "Apply Stamp"
     bl_options = {'REGISTER', 'UNDO'}
 
-    stamp_id: StringProperty()
+    stamp_id: StringProperty() #type: ignore
 
     def execute(self, context):
         obj = context.active_object
@@ -338,8 +338,8 @@ class GP_OT_delete_stamp(bpy.types.Operator):
     bl_label = "Delete Stamp"
     bl_options = {'REGISTER', 'UNDO'}
 
-    stamp_id: StringProperty()
-    stamp_name: StringProperty()
+    stamp_id: StringProperty() #type: ignore
+    stamp_name: StringProperty() #type: ignore
 
     def execute(self, context):
         index_path = get_index_path()
