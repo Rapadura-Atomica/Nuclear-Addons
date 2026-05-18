@@ -4,7 +4,6 @@ from .grease_pencil_ui import invalidate_library_previews
 from .grease_pencil_library import GPLibrary
 from typing import Tuple
 
-
 class GP_OT_save_library(bpy.types.Operator):
     """Salva o objeto Grease Pencil atual como uma biblioteca"""
     bl_idname = "gp.save_library"
@@ -16,25 +15,25 @@ class GP_OT_save_library(bpy.types.Operator):
         name="Library Name",
         description="Nome da biblioteca",
         default="my_animation"
-    )
+    ) #type: ignore 
     
     description: StringProperty(
         name="Description",
         description="Descrição da biblioteca",
         default=""
-    )
+    ) #type: ignore 
     
     frames: StringProperty(
         name="Frames",
         description="Frames para salvar (ex: 1,2,3 ou 1-10). Deixe em branco para todos",
         default=""
-    )
+    ) #type: ignore 
     
     overwrite: BoolProperty(
         name="Overwrite",
         description="Substituir biblioteca se já existir",
         default=False
-    )
+    ) #type: ignore
     
     def execute(self, context):
         # Processar frames
@@ -96,10 +95,8 @@ def apply_pose_from_library(self, target_object, pose_id: str) -> Tuple[bool, st
         
         current_frame = bpy.context.scene.frame_current
         
-        # Extrair a pose do frame específico
         success = self._extract_pose_from_frame(loaded_obj, pose.frame_number, target_object, current_frame)
         
-        # Limpar objeto temporário
         bpy.data.objects.remove(loaded_obj, do_unlink=True)
         
         if success:
@@ -119,12 +116,12 @@ class GP_OT_import_library(bpy.types.Operator):
     bl_description = "Importa um arquivo .blend de poses para o projeto (reutiliza thumbs existentes)"
     bl_options = {'REGISTER', 'UNDO'}
     
-    filepath: StringProperty(subtype='FILE_PATH')
+    filepath: StringProperty(subtype='FILE_PATH') #type: ignore 
     library_name: StringProperty(
         name="Library Name",
         description="Nome para a biblioteca no projeto",
         default=""
-    )
+    ) #type: ignore 
     
     def execute(self, context):
         library = GPLibrary()
@@ -171,7 +168,6 @@ class GP_OT_generate_all_thumbs(bpy.types.Operator):
                 thumb_filename = f"{pose.id}.png"
                 thumb_path = self._library.thumbnails_path / thumb_filename
                 
-                # CORREÇÃO AQUI: Passar o objeto pose
                 self._library._generate_thumbnail(pose, thumb_path)
                 
                 if thumb_path.exists():
@@ -234,7 +230,7 @@ class GP_OT_generate_thumbnail(bpy.types.Operator):
     bl_description = "Generate thumbnail for this pose (source project only)"
     bl_options = {'REGISTER'}
     
-    pose_id: StringProperty()
+    pose_id: StringProperty() #type: ignore
     
     def execute(self, context):
         library = GPLibrary()
@@ -448,7 +444,7 @@ class GP_OT_apply_pose(bpy.types.Operator):
     bl_description = "Substitui o desenho atual pela pose selecionada"
     bl_options = {'REGISTER', 'UNDO'}
     
-    pose_id: StringProperty()
+    pose_id: StringProperty() #type: ignore
     
     def execute(self, context):
         library = GPLibrary()
@@ -477,7 +473,7 @@ class GP_OT_delete_library(bpy.types.Operator):
     bl_description = "Remove esta biblioteca do projeto"
     bl_options = {'REGISTER', 'UNDO'}
     
-    library_name: StringProperty()
+    library_name: StringProperty() #type:ignore
     
     def execute(self, context):
         library = GPLibrary()
