@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Asset Manager Pro",
     "author": "Rapadura Atômica LTDA",
-    "version": (2, 1, 4),
+    "version": (3, 0, 0),
     "blender": (5, 0, 0),
     "location": "View3D > N-Panel > Asset Pro | File > Import",
     "description": "Gerenciador de assets com pastas + integração Asset Browser + catálogos inteligentes",
@@ -440,7 +440,7 @@ class ASSETMANAGER_OT_duplicate_project(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 # ===========================================================================
-# UI PANEL
+# # UI PANEL
 # ===========================================================================
 class ASSETMANAGER_PT_main(bpy.types.Panel):
     bl_label = "Asset Manager Pro"
@@ -477,7 +477,7 @@ classes = (
     GP_OT_save_library,
     GP_OT_import_library,
     GP_OT_generate_all_thumbs,
-    GP_OT_generate_thumbnail,      # ← ADICIONAR
+    GP_OT_generate_thumbnail,
     GP_OT_generate_library_thumbs,
     GP_PT_library_panel,
     GP_PT_library_settings,
