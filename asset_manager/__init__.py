@@ -23,6 +23,16 @@ from bpy_extras.io_utils import ImportHelper
 from bpy.app.handlers import persistent
 from .grease_pencil_ui import register_properties, unregister_properties
 
+from .drawing_cache import DrawingCacheManager
+
+from .drawing_cache_operators import (
+    DRAWINGCACHE_OT_save,
+    DRAWINGCACHE_OT_apply,
+    DRAWINGCACHE_OT_delete,
+    DRAWINGCACHE_OT_clear_all,
+)
+from .drawing_cache_ui import DRAWINGCACHE_PT_panel
+
 from .grease_pencil_operators import (
     GP_OT_save_library,
     GP_OT_import_library,
@@ -35,6 +45,7 @@ from .grease_pencil_operators import (
     GP_OT_generate_library_thumbs,
     GP_OT_generate_thumbnail, 
 )
+
 from .grease_pencil_ui import (
     GP_PT_library_panel,
     GP_PT_library_settings
@@ -133,6 +144,7 @@ def add_image_as_empty(context, abs_path: str, name_prefix="Ref_"):
                 break
     
     with override or context.temp_override():
+        #bpy.ops.image.import_as_mesh_planes(filepath=abs_path, location=(0,0,0))
         bpy.ops.object.empty_image_add(filepath=abs_path, location=(0, 0, 0))
     
     empty = context.active_object
@@ -244,6 +256,7 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
         rel_path = dest.relative_to(project)
         abs_path = str(dest.resolve())
         
+
         add_image_as_empty(context, abs_path, f"Asset_{source.stem}")
         
         self.add_to_sequence_editor(context, abs_path, source.stem)
@@ -486,6 +499,11 @@ classes = (
     GP_OT_refresh_library,
     GP_OT_apply_pose,
     GP_OT_delete_library,
+    DRAWINGCACHE_OT_save,
+    DRAWINGCACHE_OT_apply,
+    DRAWINGCACHE_OT_delete,
+    DRAWINGCACHE_OT_clear_all,
+    DRAWINGCACHE_PT_panel,
 )
 
 # Adicionar propriedades para a UI
@@ -514,10 +532,18 @@ def register_properties():
         step=1
     )
 
+    bpy.types.Scene.drawing_cache_data = bpy.props.StringProperty(
+    name="Drawing Cache Data",
+    default="",
+    options={'HIDDEN'}
+    )   
+
+
 def unregister_properties():
     del bpy.types.Scene.gp_current_library
     del bpy.types.Scene.gp_thumb_size
     del bpy.types.Scene.gp_grid_columns
+    del bpy.types.Scene.drawing_cache_data
 
 def register():
     for cls in classes:
