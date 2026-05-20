@@ -25,7 +25,7 @@ class NUCLEAR_PG_scene(PropertyGroup):
     active_peg: StringProperty(
     name="Peg Ativa",
     default=""
-    )
+    ) #type: ignore
 
 # ─── UTILITÁRIOS ─────────────────────────────────────────────────────────────
 
@@ -180,8 +180,8 @@ class NUCLEAR_OT_create_peg(Operator):
     bl_description = "Cria uma nova Peg na coleção do personagem ativo"
     bl_options = {'REGISTER', 'UNDO'}
 
-    peg_name: StringProperty(name="Nome da Peg", default="Peg_Nova")
-    parent_peg_name: StringProperty(name="Peg Pai", default="")
+    peg_name: StringProperty(name="Nome da Peg", default="Peg_Nova") #type: ignore 
+    parent_peg_name: StringProperty(name="Peg Pai", default="") #type: ignore
 
     def invoke(self, context, event):
         return context.window_manager.invoke_props_dialog(self)
@@ -274,7 +274,7 @@ class NUCLEAR_OT_set_active_peg(Operator):
     bl_label = "Definir Peg Ativa"
     bl_options = {'REGISTER', 'UNDO'}
 
-    peg_name: StringProperty()
+    peg_name: StringProperty() #type: ignore
 
     def execute(self, context):
         context.scene.nuclear_pegs.active_peg = self.peg_name
