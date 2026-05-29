@@ -13,6 +13,7 @@ bl_info = {
 import bpy
 from . import api_route as gp_api
 from .operators import ops as opers
+from . import onion_skin
 
 def register_alternative_apis():
     """Registra APIs alternativas para compatibilidade"""
@@ -116,10 +117,12 @@ def register():
     keymaps = register_keymaps()
     for cls in opers.classes:
         bpy.utils.register_class(cls)
+    onion_skin.register()
     print("TimeOffset Tool v2.2.0 registrado com sucesso!")
 
 def unregister():
     """Desregistra o addon"""
+    onion_skin.unregister()
     unregister_alternative_apis()
     global keymaps
     unregister_keymaps(keymaps)
