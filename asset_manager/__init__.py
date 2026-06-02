@@ -2,7 +2,7 @@
 bl_info = {
     "name": "Asset Manager Pro",
     "author": "Rapadura Atômica LTDA",
-    "version": (2, 1, 4),
+    "version": (3, 0, 0),
     "blender": (5, 0, 0),
     "location": "View3D > N-Panel > Asset Pro | File > Import",
     "description": "Gerenciador de assets com pastas + integração Asset Browser + catálogos inteligentes",
@@ -21,6 +21,35 @@ import math
 from bpy.props import StringProperty, BoolProperty
 from bpy_extras.io_utils import ImportHelper
 from bpy.app.handlers import persistent
+from .grease_pencil_ui import register_properties, unregister_properties
+
+from .drawing_cache import DrawingCacheManager
+
+from .drawing_cache_operators import (
+    DRAWINGCACHE_OT_save,
+    DRAWINGCACHE_OT_apply,
+    DRAWINGCACHE_OT_delete,
+    DRAWINGCACHE_OT_clear_all,
+)
+from .drawing_cache_ui import DRAWINGCACHE_PT_panel
+
+from .grease_pencil_operators import (
+    GP_OT_save_library,
+    GP_OT_import_library,
+    GP_OT_refresh_library,
+    GP_OT_apply_pose,
+    GP_OT_delete_library,
+    GP_OT_generate_all_thumbs,
+    GP_OT_clear_thumbnails,
+    GP_OT_resync_thumbnails,
+    GP_OT_generate_library_thumbs,
+    GP_OT_generate_thumbnail, 
+)
+
+from .grease_pencil_ui import (
+    GP_PT_library_panel,
+    GP_PT_library_settings
+)
 
 # ===========================================================================
 # CONFIGURAÇÕES
@@ -70,10 +99,11 @@ def register_asset_library(context=None):
             return
     try:
         new_lib = libs.new(name=lib_name, directory=str(assets_dir))
-        new_lib.import_method = 'APPEND_REUSE'
+        # CORREÇÃO: Usar 'APPEND' em vez de 'APPEND_REUSE' no Blender 5.0
+        new_lib.import_method = 'APPEND'  # Mudado de 'APPEND_REUSE'
         print(f"Asset Library registrada: {lib_name} → {assets_dir}")
     except Exception as e:
-        print(f"Erro ao registrar library: {e}")
+        print(f"Erro ao registrar library: {e}") 
 
 def create_catalog_definition(project_path):
     assets_dir = project_path / "assets"
@@ -114,6 +144,7 @@ def add_image_as_empty(context, abs_path: str, name_prefix="Ref_"):
                 break
     
     with override or context.temp_override():
+        #bpy.ops.image.import_as_mesh_planes(filepath=abs_path, location=(0,0,0))
         bpy.ops.object.empty_image_add(filepath=abs_path, location=(0, 0, 0))
     
     empty = context.active_object
@@ -141,16 +172,8 @@ def add_image_as_empty(context, abs_path: str, name_prefix="Ref_"):
         direction = cam.location - empty.location
         direction.normalize()
         
-        # Configuração para ficar voltado para -Y global
-        # -Z do Empty aponta para a direção (para a câmera)
-        # 'Y' como up axis (ou 'Z' se quiser cima no Z global)
-        rot_quat = direction.to_track_quat('-Z', 'Y')
-        empty.rotation_euler = rot_quat.to_euler()
+        empty.rotation_euler = (math.radians(90), 0, 0)
         
-        # Se ainda não estiver exatamente voltado para -Y, força alinhamento extra
-        # Teste com estes ajustes se necessário:
-        # empty.rotation_euler.x += math.radians(180)  # flip vertical
-        # empty.rotation_euler.z += math.radians(180)  # flip horizontal
     else:
         # Sem câmera: posiciona olhando para -Y global (frente padrão)
         empty.location = (0, -5, 0)  # um pouco à frente no -Y
@@ -166,8 +189,8 @@ class ASSETMANAGER_OT_first_save(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.first_save"
     bl_label = "Primeiro Salvamento"
     bl_options = {'REGISTER', 'UNDO'}
-    directory: StringProperty(subtype='DIR_PATH')
-    project_name: StringProperty(default="MeuProjeto")
+    directory: StringProperty(subtype='DIR_PATH') #type: ignore
+    project_name: StringProperty(default="MeuProjeto") #type: ignore
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -211,9 +234,9 @@ class ASSETMANAGER_OT_first_save(bpy.types.Operator, ImportHelper):
 class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.import_asset"
     bl_label = "Importar Asset Organizado"
-    filter_glob: StringProperty(default="*.*", options={'HIDDEN'})
-    auto_organize: BoolProperty(name="Organizar Automaticamente", default=True)
-    pack_images: BoolProperty(name="Pack Imagens Após Importar", default=True)
+    filter_glob: StringProperty(default="*.*", options={'HIDDEN'}) #type: ignore
+    auto_organize: BoolProperty(name="Organizar Automaticamente", default=True) #type: ignore 
+    pack_images: BoolProperty(name="Pack Imagens Após Importar", default=True) #type: ignore
 
     def execute(self, context):
         source = Path(self.filepath)
@@ -232,22 +255,72 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
         shutil.copy2(source, dest)
         rel_path = dest.relative_to(project)
         abs_path = str(dest.resolve())
-        self.load_to_blender(dest, rel_path, context, category)
         
-        # Adicionar imagens como Empty de referência
-        ext_lower = source.suffix.lower()
-        if ext_lower in ASSET_CATEGORIES['images'] + ASSET_CATEGORIES['textures']:
-            add_image_as_empty(context, abs_path)
-            self.report({'INFO'}, f"Imagem adicionada como Empty de referência ({5000} frames)")
+
+        add_image_as_empty(context, abs_path, f"Asset_{source.stem}")
         
-        if self.pack_images and ext_lower in ASSET_CATEGORIES['textures'] + ASSET_CATEGORIES['images']:
-            for img in bpy.data.images:
-                if img.filepath == bpy.path.relpath(abs_path):
-                    img.pack()
-                    break
-        self.report({'INFO'}, f"Asset importado: //{rel_path} (Catálogo: {CATALOG_MAP.get(category, 'Misc')})")
+        self.add_to_sequence_editor(context, abs_path, source.stem)
+        
+        self.report({'INFO'}, f"Asset importado: //{rel_path}")
         register_asset_library()
         return {'FINISHED'}
+
+    def add_to_sequence_editor(self, context, abs_path: str, name: str):
+        """Adiciona arquivo ao Sequence Editor com tratamento de erro"""
+        try:
+            # Garantir que o sequence editor existe
+            if not context.scene.sequence_editor:
+                context.scene.sequence_editor_create()
+            
+            seq_editor = context.scene.sequence_editor
+            
+            # Blender 5.0+ usa sequences.all
+            if hasattr(seq_editor, 'sequences_all'):
+                sequences = seq_editor.sequences_all
+            elif hasattr(seq_editor, 'sequences'):
+                sequences = seq_editor.sequences
+            else:
+                print("⚠️ Não foi possível acessar sequences do VSE")
+                return
+            
+            # Adicionar strip dependendo do tipo de arquivo
+            ext = Path(abs_path).suffix.lower()
+            
+            if ext in ['.mp4', '.avi', '.mov', '.mkv', '.webm', '.flv']:
+                # Vídeo
+                bpy.ops.sequencer.movie_strip_add(
+                    filepath=abs_path,
+                    frame_start=context.scene.frame_current,
+                    channel=2
+                )
+                self.report({'INFO'}, f"Vídeo adicionado ao VSE: {name}")
+                
+            elif ext in ['.wav', '.mp3', '.ogg', '.flac', '.aac']:
+                # Áudio
+                bpy.ops.sequencer.sound_strip_add(
+                    filepath=abs_path,
+                    frame_start=context.scene.frame_current,
+                    channel=1
+                )
+                self.report({'INFO'}, f"Áudio adicionado ao VSE: {name}")
+            
+            # Ajustar duração da cena se necessário
+            if hasattr(seq_editor, 'strips'):
+                strips = seq_editor.strips
+            elif hasattr(seq_editor, 'sequences'):
+                strips = seq_editor.sequences
+            else:
+                strips = []
+            
+            for strip in strips:
+                if hasattr(strip, 'frame_final_duration'):
+                    end_frame = strip.frame_start + strip.frame_final_duration
+                    if end_frame > context.scene.frame_end:
+                        context.scene.frame_end = end_frame + 50
+                        
+        except Exception as e:
+            self.report({'WARNING'}, f"Não foi possível adicionar ao VSE: {str(e)}")
+            print(f"Erro no VSE: {e}")
 
     def get_category(self, path):
         ext = path.suffix.lower()
@@ -266,63 +339,12 @@ class ASSETMANAGER_OT_import_asset(bpy.types.Operator, ImportHelper):
             i += 1
         return folder / f"{stem}_{i:03d}{ext}"
 
-    def load_to_blender(self, abs_path: Path, rel_path: Path, context, category: str):
-        ext = abs_path.suffix.lower()
-        str_abs = str(abs_path)
-        catalog_name = CATALOG_MAP.get(category, 'Misc')
-        try:
-            if ext in ASSET_CATEGORIES['textures'] + ASSET_CATEGORIES['images'] + ASSET_CATEGORIES['hdris']:
-                img = bpy.data.images.load(str_abs, check_existing=True)
-                img.filepath = bpy.path.relpath(str_abs)
-                img.name = abs_path.stem
-            elif ext in ASSET_CATEGORIES['videos']:
-                if not context.scene.sequence_editor:
-                    context.scene.sequence_editor_create()
-                strip = context.scene.sequence_editor.sequences.new_movie(
-                    name=abs_path.stem, filepath=str_abs, channel=2, frame_start=1)
-                # Ajustar frame_end da cena para caber o vídeo
-                if strip.frame_final_duration > context.scene.frame_end:
-                    context.scene.frame_end = strip.frame_final_duration + 50
-                    print(f"Frame end ajustado para {context.scene.frame_end}")
-            elif ext in ASSET_CATEGORIES['audio']:
-                if not context.scene.sequence_editor:
-                    context.scene.sequence_editor_create()
-                context.scene.sequence_editor.sequences.new_sound(
-                    name=abs_path.stem, filepath=str_abs, channel=1, frame_start=1)
-            elif ext == '.blend':
-                with bpy.data.libraries.load(str_abs, link=False) as (data_from, data_to):
-                    data_to.objects = data_from.objects
-                    data_to.materials = data_from.materials
-                    data_to.collections = data_from.collections
-                for datatype in [bpy.data.objects, bpy.data.materials, bpy.data.collections]:
-                    for item in datatype:
-                        if item.library and item.asset_data:
-                            item.asset_mark()
-                            item.asset_data.catalog_id = self.get_catalog_uuid(catalog_name)
-            else:
-                self.report({'WARNING'}, f"Tipo não suportado para importação automática: {ext}")
-        except Exception as e:
-            self.report({'ERROR'}, f"Erro ao carregar {ext.upper()}: {str(e)}")
-
-    def get_catalog_uuid(self, catalog_name: str):
-        project = find_project_path()
-        if not project:
-            return ""
-        cdf_path = project / "assets" / "blender_assets.cdf"
-        if not cdf_path.exists():
-            return ""
-        with open(cdf_path, 'r') as f:
-            for line in f:
-                if ':' in line and line.split(':')[1].strip() == catalog_name:
-                    return line.split(':')[0].strip()
-        return ""
-
 class ASSETMANAGER_OT_import_animatic(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.import_animatic"
     bl_label = "Importar Animatic"
     bl_options = {'REGISTER', 'UNDO'}
     filename_ext = ".mp4"
-    filter_glob: StringProperty(default="*.mp4;*.avi;*.mov;*.mkv;*.webm")
+    filter_glob: StringProperty(default="*.mp4;*.avi;*.mov;*.mkv;*.webm") #type: ignore
 
     def execute(self, context):
         source = Path(self.filepath)
@@ -347,29 +369,34 @@ class ASSETMANAGER_OT_import_animatic(bpy.types.Operator, ImportHelper):
         empty = context.active_object
         if empty:
             empty.name = f"Animatic_{source.stem}"
+            empty.rotation_euler = (math.radians(90), 0, 0)
             if context.scene.camera:
                 cam = context.scene.camera
                 cam_matrix = cam.matrix_world
                 cam_forward = (cam_matrix @ Vector((0, 0, -1))) - cam.location
                 cam_forward.normalize()
                 empty.location = cam.location + (cam_forward * 3.0)
-                direction = cam.location - empty.location
-                direction.normalize()
-                rot_quat = direction.to_track_quat('-Z', '-Y')
-                empty.rotation_euler = rot_quat.to_euler()
-            else:
-                empty.rotation_euler = (math.radians(90), 0, 0)
         
-        # Import no VSE
-        if not context.scene.sequence_editor:
-            context.scene.sequence_editor_create()
-        strip = context.scene.sequence_editor.sequences.new_movie(
-            name=source.stem, filepath=abs_path, channel=2, frame_start=1, sound=True)
-        
-        # Ajustar duração da cena
-        if strip.frame_final_duration > context.scene.frame_end:
-            context.scene.frame_end = strip.frame_final_duration + 50
-            self.report({'INFO'}, f"Frame end ajustado para {context.scene.frame_end} frames")
+            #Import no VSE
+            if not context.scene.sequence_editor:
+                context.scene.sequence_editor_create()
+            
+            # Procura a área do Sequencer para fazer o override
+            for window in context.window_manager.windows:
+                for area in window.screen.areas:
+                    if area.type == 'SEQUENCE_EDITOR':
+                        # --- NOVO JEITO ---
+                        with context.temp_override(window=window, area=area, screen=window.screen):
+                            bpy.ops.sequencer.movie_strip_add(
+                                filepath=abs_path,
+                                frame_start=1,
+                                channel=1,
+                                sound=True
+                            )
+                        break
+                else:
+                    continue
+                break
         
         self.report({'INFO'}, f"Animatic importado: //{rel_path}")
         register_asset_library()
@@ -389,8 +416,8 @@ class ASSETMANAGER_OT_duplicate_project(bpy.types.Operator, ImportHelper):
     bl_idname = "assetmanager.duplicate_project"
     bl_label = "Duplicar Projeto (Save As Novo)"
     bl_options = {'REGISTER'}
-    directory: StringProperty(subtype='DIR_PATH')
-    new_project_name: StringProperty(default="Projeto_Copia")
+    directory: StringProperty(subtype='DIR_PATH') #type: ignore 
+    new_project_name: StringProperty(default="Projeto_Copia") #type: ignore 
 
     def invoke(self, context, event):
         context.window_manager.fileselect_add(self)
@@ -426,7 +453,7 @@ class ASSETMANAGER_OT_duplicate_project(bpy.types.Operator, ImportHelper):
         return {'FINISHED'}
 
 # ===========================================================================
-# UI PANEL
+# # UI PANEL
 # ===========================================================================
 class ASSETMANAGER_PT_main(bpy.types.Panel):
     bl_label = "Asset Manager Pro"
@@ -460,19 +487,77 @@ classes = (
     ASSETMANAGER_OT_import_animatic,
     ASSETMANAGER_OT_duplicate_project,
     ASSETMANAGER_PT_main,
+    GP_OT_save_library,
+    GP_OT_import_library,
+    GP_OT_generate_all_thumbs,
+    GP_OT_generate_thumbnail,
+    GP_OT_generate_library_thumbs,
+    GP_PT_library_panel,
+    GP_PT_library_settings,
+    GP_OT_clear_thumbnails,
+    GP_OT_resync_thumbnails,
+    GP_OT_refresh_library,
+    GP_OT_apply_pose,
+    GP_OT_delete_library,
+    DRAWINGCACHE_OT_save,
+    DRAWINGCACHE_OT_apply,
+    DRAWINGCACHE_OT_delete,
+    DRAWINGCACHE_OT_clear_all,
+    DRAWINGCACHE_PT_panel,
 )
+
+# Adicionar propriedades para a UI
+def register_properties():
+    bpy.types.Scene.gp_current_library = bpy.props.StringProperty(
+        name="Current Library",
+        description="Currently selected library",
+        default=""
+    )
+    
+    bpy.types.Scene.gp_thumb_size = bpy.props.IntProperty(
+        name="Thumbnail Size",
+        description="Size of thumbnails in gallery",
+        default=64,
+        min=32,
+        max=256,
+        step=8
+    )
+    
+    bpy.types.Scene.gp_grid_columns = bpy.props.IntProperty(
+        name="Grid Columns",
+        description="Number of columns in gallery grid",
+        default=4,
+        min=2,
+        max=8,
+        step=1
+    )
+
+    bpy.types.Scene.drawing_cache_data = bpy.props.StringProperty(
+    name="Drawing Cache Data",
+    default="",
+    options={'HIDDEN'}
+    )   
+
+
+def unregister_properties():
+    del bpy.types.Scene.gp_current_library
+    del bpy.types.Scene.gp_thumb_size
+    del bpy.types.Scene.gp_grid_columns
+    del bpy.types.Scene.drawing_cache_data
 
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
     bpy.types.TOPBAR_MT_file_import.append(menu_import)
     bpy.app.handlers.load_post.append(load_handler)
+    register_properties()
 
 def unregister():
     for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     bpy.types.TOPBAR_MT_file_import.remove(menu_import)
     bpy.app.handlers.load_post.remove(load_handler)
+    unregister_properties()
 
 if __name__ == "__main__":
     register()
