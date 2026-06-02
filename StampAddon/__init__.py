@@ -12,7 +12,9 @@ import bpy
 import json
 import uuid
 from pathlib import Path
-from bpy.props import StringProperty
+from bpy.props import StringProperty, BoolProperty
+from bpy_extras import view3d_utils
+from mathutils import Vector
 
 from . import api_route
 
@@ -27,6 +29,77 @@ def get_stamps_path():
 
 def get_index_path():
     return get_stamps_path() / "stamps_index.json"
+
+
+# ===========================================================================
+# MATERIAIS (cores do carimbo)
+# ===========================================================================
+def serialize_gp_material(mat):
+    """Serializa um material de Grease Pencil para JSON"""
+    data = {"name": mat.name}
+    gp = getattr(mat, "grease_pencil", None)
+    if gp:
+        data["gp"] = {
+            "color": list(gp.color),
+            "fill_color": list(gp.fill_color),
+            "show_stroke": gp.show_stroke,
+            "show_fill": gp.show_fill,
+            "mode": gp.mode,
+            "stroke_style": gp.stroke_style,
+            "fill_style": gp.fill_style,
+        }
+    return data
+
+def ensure_material(obj, mat_data):
+    """Garante que o material exista no objeto-alvo, retornando seu índice de slot.
+
+    1. Se já houver um slot com o mesmo nome, reutiliza.
+    2. Senão, reaproveita/cria o data-block de material e o anexa ao objeto.
+    """
+    name = mat_data.get("name", "Stamp_Mat")
+
+    # Já existe um slot com esse nome?
+    for i, slot_mat in enumerate(obj.data.materials):
+        if slot_mat and slot_mat.name == name:
+            return i
+
+    # Reaproveita um data-block existente (se for GP) ou cria um novo
+    mat = bpy.data.materials.get(name)
+    if mat is None or getattr(mat, "grease_pencil", None) is None:
+        mat = bpy.data.materials.new(name)
+        if getattr(mat, "grease_pencil", None) is None:
+            bpy.data.materials.create_gpencil_data(mat)
+        gp_data = mat_data.get("gp")
+        if gp_data and mat.grease_pencil:
+            gp = mat.grease_pencil
+            gp.color = gp_data.get("color", (0.0, 0.0, 0.0, 1.0))
+            gp.fill_color = gp_data.get("fill_color", (0.0, 0.0, 0.0, 0.0))
+            gp.show_stroke = gp_data.get("show_stroke", True)
+            gp.show_fill = gp_data.get("show_fill", False)
+            for prop in ("mode", "stroke_style", "fill_style"):
+                if prop in gp_data:
+                    try:
+                        setattr(gp, prop, gp_data[prop])
+                    except (TypeError, AttributeError):
+                        pass
+
+    obj.data.materials.append(mat)
+    return len(obj.data.materials) - 1
+
+
+def get_stamp_centroid(stamp_data):
+    """Centro geométrico (média) de todos os pontos do carimbo, em espaço local."""
+    total = Vector((0.0, 0.0, 0.0))
+    count = 0
+    for layer_data in stamp_data.get("strokes_data", []):
+        for stroke_data in layer_data.get("strokes", []):
+            for point_data in stroke_data.get("points", []):
+                pos = point_data.get("position", [0, 0, 0])
+                total += Vector(pos)
+                count += 1
+    if count == 0:
+        return Vector((0.0, 0.0, 0.0))
+    return total / count
 
 
 # ===========================================================================
@@ -87,46 +160,47 @@ class GP_OT_save_stamp(bpy.types.Operator):
         """Captura todos os strokes usando a API bridge"""
         data = {
             "strokes_data": [],
-            "object_name": obj.name
+            "object_name": obj.name,
+            "materials": {}  # nome do material -> dados serializados (cores)
         }
-        
+
         gpdata = obj.data
-        
+
         # Percorrer layers
         for layer_idx, layer in enumerate(gpdata.layers):
             if api_route.layer_hidden(layer):
                 continue
-                
+
             # Encontrar frame na layer
             frame_block = api_route.get_layer_frame_by_number(layer, frame)
-            
+
             if not frame_block or not api_route.is_frame_valid(frame_block):
                 continue
-            
+
             # Acessar strokes via nuclear_strokes (API bridge)
             strokes = frame_block.nuclear_strokes
-            
+
             if len(strokes) == 0:
                 continue
-            
+
             layer_data = {
                 "layer_name": layer.name,
                 "layer_index": layer_idx,
                 "strokes": []
             }
-            
+
             for stroke in strokes:
-                stroke_data = self.capture_stroke(stroke)
+                stroke_data = self.capture_stroke(stroke, obj, data["materials"])
                 if stroke_data and stroke_data.get("points"):
                     layer_data["strokes"].append(stroke_data)
-            
+
             if layer_data["strokes"]:
                 data["strokes_data"].append(layer_data)
-        
+
         return data
 
-    def capture_stroke(self, stroke):
-        """Captura um stroke individual"""
+    def capture_stroke(self, stroke, obj, materials_out):
+        """Captura um stroke individual + registra seu material (cores)"""
         try:
             points = []
             for point in stroke.points:
@@ -136,14 +210,34 @@ class GP_OT_save_stamp(bpy.types.Operator):
                     "pressure": point.pressure,
                     "vertex_color": list(point.vertex_color) if hasattr(point, 'vertex_color') else [0, 0, 0, 0]
                 })
-            
-            return {
+
+            # Registrar o material por nome para levar as cores junto
+            mat_index = stroke.material_index
+            mat_name = None
+            mats = obj.data.materials
+            if 0 <= mat_index < len(mats) and mats[mat_index]:
+                mat = mats[mat_index]
+                mat_name = mat.name
+                if mat_name not in materials_out:
+                    materials_out[mat_name] = serialize_gp_material(mat)
+
+            data = {
                 "points": points,
-                "material_index": stroke.material_index,
+                "material_index": mat_index,
+                "material_name": mat_name,
                 "use_cyclic": stroke.use_cyclic,
                 "line_width": stroke.line_width if hasattr(stroke, 'line_width') else 10,
-                "hardness": stroke.hardness if hasattr(stroke, 'hardness') else 1.0
+                "hardness": stroke.hardness if hasattr(stroke, 'hardness') else 1.0,
             }
+
+            # Cor de preenchimento por stroke (vertex color fill), se existir
+            if hasattr(stroke, 'vertex_color_fill'):
+                try:
+                    data["vertex_color_fill"] = list(stroke.vertex_color_fill)
+                except (TypeError, ValueError):
+                    pass
+
+            return data
         except Exception as e:
             print(f"Erro ao capturar stroke: {e}")
             return None
@@ -179,16 +273,22 @@ class GP_OT_save_stamp(bpy.types.Operator):
 # OPERADOR: APLICAR CARIMBO
 # ===========================================================================
 class GP_OT_apply_stamp(bpy.types.Operator):
-    """Aplica um carimbo no frame atual"""
+    """Carimba o desenho: clique na viewport para posicioná-lo onde o mouse estiver"""
     bl_idname = "gp.apply_stamp"
     bl_label = "Apply Stamp"
     bl_options = {'REGISTER', 'UNDO'}
 
     stamp_id: StringProperty() #type: ignore
+    use_mouse: BoolProperty(default=True) #type: ignore  # colar onde o mouse clicar
 
-    def execute(self, context):
+    # Estado interno do modal
+    _stamp_data = None
+    _stamp_name = ""
+    _centroid = None
+
+    # ----------------------------------------------------------------- INVOKE
+    def invoke(self, context, event):
         obj = context.active_object
-        
         if not obj or not api_route.obj_is_gp(obj):
             self.report({'ERROR'}, "Select a Grease Pencil object")
             return {'CANCELLED'}
@@ -196,128 +296,219 @@ class GP_OT_apply_stamp(bpy.types.Operator):
         # Carregar stamp
         index = self.load_index()
         stamp_info = index.get(self.stamp_id)
-        
         if not stamp_info:
             self.report({'ERROR'}, "Stamp not found")
             return {'CANCELLED'}
-        
+
         stamp_file = get_stamps_path() / stamp_info["file"]
-        
         if not stamp_file.exists():
             self.report({'ERROR'}, "Stamp file missing")
             return {'CANCELLED'}
-        
+
         with open(stamp_file, 'r') as f:
-            stamp_data = json.load(f)
-        
-        # Aplicar no frame atual
-        success = self.apply_stamp(obj, context.scene.frame_current, stamp_data)
-        
+            self._stamp_data = json.load(f)
+
+        self._stamp_name = stamp_info.get("name", "Stamp")
+        self._centroid = get_stamp_centroid(self._stamp_data)
+
+        # Sem mouse ou fora da viewport -> cola na posição original
+        if not self.use_mouse or context.area is None or context.area.type != 'VIEW_3D':
+            return self.execute(context)
+
+        context.window_manager.modal_handler_add(self)
+        context.area.header_text_set(
+            "🖱️ Clique para carimbar o desenho  |  ESC / botão direito: cancelar"
+        )
+        return {'RUNNING_MODAL'}
+
+    # ------------------------------------------------------------------ MODAL
+    def modal(self, context, event):
+        context.area.tag_redraw()
+
+        if event.type in {'RIGHTMOUSE', 'ESC'}:
+            context.area.header_text_set(None)
+            return {'CANCELLED'}
+
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            region = self.get_window_region(context, event)
+            if region is None:
+                # Clique fora da janela 3D (ex.: no N-panel) -> ignora e segue esperando
+                return {'RUNNING_MODAL'}
+
+            rv3d = context.space_data.region_3d
+            obj = context.active_object
+            coord = (event.mouse_x - region.x, event.mouse_y - region.y)
+
+            # Projeta o clique num plano que passa pela origem do objeto
+            depth = obj.matrix_world.translation
+            world = view3d_utils.region_2d_to_location_3d(region, rv3d, coord, depth)
+            local_target = obj.matrix_world.inverted() @ world
+            offset = local_target - self._centroid
+
+            ok = self.apply_stamp(obj, context.scene.frame_current, self._stamp_data, offset)
+            context.area.header_text_set(None)
+
+            if ok:
+                self.report({'INFO'}, f"Stamp '{self._stamp_name}' aplicado!")
+                context.view_layer.update()
+                context.area.tag_redraw()
+                return {'FINISHED'}
+            self.report({'ERROR'}, "Failed to apply stamp")
+            return {'CANCELLED'}
+
+        return {'RUNNING_MODAL'}
+
+    def get_window_region(self, context, event):
+        """Retorna a região WINDOW (viewport 3D) sob o cursor, ou None."""
+        for region in context.area.regions:
+            if region.type == 'WINDOW':
+                if (region.x <= event.mouse_x < region.x + region.width and
+                        region.y <= event.mouse_y < region.y + region.height):
+                    return region
+        return None
+
+    # ---------------------------------------------------------------- EXECUTE
+    def execute(self, context):
+        """Aplicação não-modal: cola na posição original (offset zero)."""
+        obj = context.active_object
+        if not obj or not api_route.obj_is_gp(obj):
+            self.report({'ERROR'}, "Select a Grease Pencil object")
+            return {'CANCELLED'}
+
+        if self._stamp_data is None:
+            index = self.load_index()
+            stamp_info = index.get(self.stamp_id)
+            if not stamp_info:
+                self.report({'ERROR'}, "Stamp not found")
+                return {'CANCELLED'}
+            stamp_file = get_stamps_path() / stamp_info["file"]
+            if not stamp_file.exists():
+                self.report({'ERROR'}, "Stamp file missing")
+                return {'CANCELLED'}
+            with open(stamp_file, 'r') as f:
+                self._stamp_data = json.load(f)
+            self._stamp_name = stamp_info.get("name", "Stamp")
+
+        success = self.apply_stamp(obj, context.scene.frame_current,
+                                   self._stamp_data, Vector((0.0, 0.0, 0.0)))
+
         if success:
-            self.report({'INFO'}, f"Stamp '{stamp_info['name']}' applied!")
-            # Refresh viewport
+            self.report({'INFO'}, f"Stamp '{self._stamp_name}' applied!")
             context.view_layer.update()
             for area in context.screen.areas:
                 if area.type == 'VIEW_3D':
                     area.tag_redraw()
             return {'FINISHED'}
-        else:
-            self.report({'ERROR'}, "Failed to apply stamp")
-            return {'CANCELLED'}
 
-    def apply_stamp(self, obj, frame, stamp_data):
-        """Aplica os strokes do carimbo usando a API bridge"""
+        self.report({'ERROR'}, "Failed to apply stamp")
+        return {'CANCELLED'}
+
+    # ----------------------------------------------------------------- APPLY
+    def apply_stamp(self, obj, frame, stamp_data, offset):
+        """Aplica os strokes do carimbo, deslocados por `offset` (espaço local)."""
         try:
             gpdata = obj.data
-            
+
             # Sair do modo EDIT se necessário
             if bpy.context.mode == 'EDIT':
                 bpy.ops.object.mode_set(mode='OBJECT')
-            
+
+            # Remapear materiais (cores) do carimbo para o objeto-alvo
+            mat_remap = self.build_material_remap(obj, stamp_data)
+
             strokes_added = 0
-            
-            # Para cada layer no stamp
+
             for layer_data in stamp_data.get("strokes_data", []):
                 layer_name = layer_data.get("layer_name", "StampLayer")
-                
+
                 # Encontrar ou criar layer
                 layer = None
                 for l in gpdata.layers:
                     if l.name == layer_name:
                         layer = l
                         break
-                
                 if not layer:
                     layer = gpdata.layers.new(name=layer_name, set_active=True)
-                
+
                 # Obter ou criar frame
                 frame_block = api_route.get_layer_frame_by_number(layer, frame)
-                
-                if not frame_block:
-                    # Criar novo frame
+                if not frame_block or frame_block.frame_number != frame:
                     if api_route.is_gpv3():
                         frame_block = layer.frames.new(frame)
                     else:
                         frame_block = layer.frames.new(frame, active=True)
-                
+
                 if not frame_block or not api_route.is_frame_valid(frame_block):
                     continue
-                
-                # Acessar strokes via nuclear_strokes
+
                 strokes = frame_block.nuclear_strokes
-                
-                # Adicionar cada stroke
+
                 for stroke_data in layer_data.get("strokes", []):
                     new_stroke = strokes.new()
-                    self.populate_stroke(new_stroke, stroke_data)
+                    self.populate_stroke(new_stroke, stroke_data, offset, mat_remap)
                     strokes_added += 1
-            
-            print(f"✅ Aplicado: {strokes_added} strokes no frame {frame}")
+
+            print(f"✅ Aplicado: {strokes_added} strokes no frame {frame} (offset {offset})")
             return strokes_added > 0
-            
+
         except Exception as e:
             print(f"Erro ao aplicar stamp: {e}")
             import traceback
             traceback.print_exc()
             return False
 
-    def populate_stroke(self, stroke, stroke_data):
-        """Popula um stroke com os dados salvos"""
+    def build_material_remap(self, obj, stamp_data):
+        """nome do material salvo -> índice de slot no objeto-alvo (cria se faltar)."""
+        remap = {}
+        for name, mat_data in stamp_data.get("materials", {}).items():
+            try:
+                remap[name] = ensure_material(obj, mat_data)
+            except Exception as e:
+                print(f"Erro ao garantir material '{name}': {e}")
+        return remap
+
+    def populate_stroke(self, stroke, stroke_data, offset, mat_remap):
+        """Popula um stroke com os dados salvos, aplicando offset e remapeando material."""
         try:
-            # Configurar propriedades do stroke
-            stroke.material_index = stroke_data.get("material_index", 0)
+            # Material: prioriza o remapeamento por nome (leva as cores junto)
+            mat_name = stroke_data.get("material_name")
+            if mat_name and mat_name in mat_remap:
+                stroke.material_index = mat_remap[mat_name]
+            else:
+                stroke.material_index = stroke_data.get("material_index", 0)
+
             stroke.use_cyclic = stroke_data.get("use_cyclic", False)
-            
+
             if hasattr(stroke, 'hardness'):
                 stroke.hardness = stroke_data.get("hardness", 1.0)
-            
+
+            if hasattr(stroke, 'vertex_color_fill') and "vertex_color_fill" in stroke_data:
+                try:
+                    stroke.vertex_color_fill = stroke_data["vertex_color_fill"]
+                except (TypeError, ValueError):
+                    pass
+
             # Adicionar pontos
             points_data = stroke_data.get("points", [])
-            
-            # Ajustar número de pontos (se necessário)
             current_point_count = len(stroke.points)
             if len(points_data) > current_point_count:
-                # Precisamos adicionar mais pontos
-                for i in range(len(points_data) - current_point_count):
+                for _ in range(len(points_data) - current_point_count):
                     stroke.points.add(1)
-            elif len(points_data) < current_point_count:
-                # Remover pontos extras (menos comum)
-                pass
-            
-            # Preencher dados dos pontos
+
+            # Preencher dados dos pontos (com deslocamento do carimbo)
             for i, point_data in enumerate(points_data):
                 if i >= len(stroke.points):
                     break
-                    
+
                 point = stroke.points[i]
-                point.co = point_data["position"]
+                pos = Vector(point_data["position"]) + offset
+                point.co = pos
                 point.strength = point_data.get("strength", 1.0)
                 point.pressure = point_data.get("pressure", 1.0)
-                
+
                 if hasattr(point, 'vertex_color'):
-                    vcolor = point_data.get("vertex_color", [0, 0, 0, 0])
-                    point.vertex_color = vcolor
-                    
+                    point.vertex_color = point_data.get("vertex_color", [0, 0, 0, 0])
+
         except Exception as e:
             print(f"Erro ao popular stroke: {e}")
 
@@ -436,6 +627,7 @@ class GP_PT_stamp_panel(bpy.types.Panel):
         # ===== LISTA DE CARIMBOS =====
         box = layout.box()
         box.label(text="🎨 STAMP LIBRARY", icon='FILE')
+        box.label(text="Click ▶ then click in the viewport to place", icon='RESTRICT_SELECT_OFF')
         
         index_path = get_index_path()
         if not index_path.exists():
