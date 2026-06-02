@@ -302,7 +302,16 @@ class GenerateAutoMatteOperator(bpy.types.Operator):
     clear_previous: bpy.props.BoolProperty(
         name="Clear Previous Matte",
         default=True,
-        description="Remove existing strokes on the AutoMatte layer for this frame before generating"
+        description="Remove the existing matte before generating. In All Keyframes mode this wipes every "
+                    "AutoMatte keyframe first for a clean re-bake"
+    )  # type: ignore
+    frame_mode: bpy.props.EnumProperty(
+        name="Frames",
+        items=[('CURRENT', 'Current Frame', 'Generate a matte only for the active frame'),
+               ('ALL', 'All Keyframes', 'Bake a matte for every keyframe of the line art layer, '
+                                        'following the whole animation in one click')],
+        default='CURRENT',
+        description="Which frames of the line art layer to process"
     )  # type: ignore
 
     @classmethod
@@ -318,6 +327,7 @@ class GenerateAutoMatteOperator(bpy.types.Operator):
         row = layout.row()
         row.label(text="Line Art Layer:")
         row.prop(self, "line_layer", icon='OUTLINER_DATA_GP_LAYER', text='')
+        layout.prop(self, "frame_mode")
         layout.prop(self, "precision")
         layout.prop(self, "fill_holes")
         layout.prop(self, "clear_previous")
@@ -338,35 +348,69 @@ class GenerateAutoMatteOperator(bpy.types.Operator):
             self.report({"WARNING"}, "The line art layer cannot be the AutoMatte layer.")
             return {'CANCELLED'}
 
-        line_frame = line_layer.active_frame
-        if not is_frame_valid(line_frame) or len(line_frame.nijigp_strokes) < 1:
-            self.report({"WARNING"}, "The line art layer has no strokes on the current frame.")
+        # Collect the line-art keyframes to process. GP keyframe data is readable
+        # directly, so we never have to move the scene's current frame.
+        if self.frame_mode == 'ALL':
+            line_frames = [f for f in line_layer.frames if is_frame_valid(f)]
+        else:
+            active = line_layer.active_frame
+            line_frames = [active] if is_frame_valid(active) else []
+        line_frames = [f for f in line_frames if len(f.nijigp_strokes) >= 1]
+        if not line_frames:
+            self.report({"WARNING"}, "The line art layer has no strokes to process.")
             return {'CANCELLED'}
 
         # Edit the drawing data from Object mode for safety
         if current_mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
 
+        total_filled, processed = 0, 0
         try:
-            n_regions = self._generate(context, gp_obj, line_layer, line_frame)
+            # Materials and matte layer are created once, then reused for every frame
+            fill_idx = _get_or_create_material(gp_obj, MATTE_FILL_MAT_NAME, self.matte_color, holdout=False)
+            holdout_idx = (_get_or_create_material(gp_obj, MATTE_HOLDOUT_MAT_NAME, self.matte_color, holdout=True)
+                           if self.fill_holes else fill_idx)
+            matte_layer = _get_or_create_matte_layer(gp_obj)
+
+            # A full re-bake wipes every stale matte keyframe first
+            if self.clear_previous and self.frame_mode == 'ALL':
+                for f in list(matte_layer.frames):
+                    remove_frame(matte_layer.frames, f)
+
+            for lf in line_frames:
+                n = self._generate_frame(gp_obj, lf, lf.frame_number, fill_idx, holdout_idx,
+                                         matte_layer, context.scene.nijigp_working_plane)
+                total_filled += n
+                if n > 0:
+                    processed += 1
+
+            # Keep the user working on their line art, not on the matte layer
+            try:
+                gp_obj.data.layers.active = line_layer
+            except Exception:
+                pass
+            refresh_strokes(gp_obj, [f.frame_number for f in line_frames])
         finally:
             if gp_obj.mode != current_mode:
                 bpy.ops.object.mode_set(mode=current_mode)
 
-        if n_regions == 0:
+        if total_filled == 0:
             self.report({"WARNING"}, "No closed region found. Try lowering Precision to close gaps.")
+        elif self.frame_mode == 'ALL':
+            self.report({"INFO"}, f"Auto Matte: filled {total_filled} region(s) across {processed} keyframe(s).")
         else:
-            self.report({"INFO"}, f"Auto Matte: filled {n_regions} region(s).")
+            self.report({"INFO"}, f"Auto Matte: filled {total_filled} region(s).")
         return {'FINISHED'}
 
-    def _generate(self, context, gp_obj, line_layer, line_frame):
+    def _generate_frame(self, gp_obj, line_frame, frame_number, fill_idx, holdout_idx,
+                        matte_layer, working_plane):
+        """Generate the matte for a single line-art keyframe onto matte_layer at frame_number."""
         stroke_list = [s for s in line_frame.nijigp_strokes if not is_stroke_protected(s, gp_obj)]
         if len(stroke_list) < 1:
             return 0
 
-        t_mat, inv_mat = get_transformation_mat(mode=context.scene.nijigp_working_plane,
-                                                gp_obj=gp_obj, strokes=stroke_list,
-                                                operator=self, requires_layer=False)
+        t_mat, inv_mat = get_transformation_mat(mode=working_plane, gp_obj=gp_obj,
+                                                strokes=stroke_list, operator=self, requires_layer=False)
         poly_list, depth_list, scale_factor = get_2d_co_from_strokes(stroke_list, t_mat, scale=True)
         depth_tree = DepthLookupTree(poly_list, depth_list)
 
@@ -376,18 +420,11 @@ class GenerateAutoMatteOperator(bpy.types.Operator):
         if not regions:
             return 0
 
-        # Materials and target layer/frame
-        fill_idx = _get_or_create_material(gp_obj, MATTE_FILL_MAT_NAME, self.matte_color, holdout=False)
-        holdout_idx = (_get_or_create_material(gp_obj, MATTE_HOLDOUT_MAT_NAME, self.matte_color, holdout=True)
-                       if self.fill_holes else fill_idx)
-
-        matte_layer = _get_or_create_matte_layer(gp_obj)
-        frame_number = context.scene.frame_current
+        # Target keyframe on the matte layer (create one exactly at frame_number)
         matte_frame = get_layer_frame_by_number(matte_layer, frame_number)
         if not matte_frame or matte_frame.frame_number != frame_number:
             matte_frame = new_active_frame(matte_layer.frames, frame_number)
-
-        if self.clear_previous:
+        elif self.clear_previous:
             for stroke in list(matte_frame.nijigp_strokes):
                 matte_frame.nijigp_strokes.remove(stroke)
 
@@ -405,12 +442,4 @@ class GenerateAutoMatteOperator(bpy.types.Operator):
                 new_stroke.points[i].co = restore_3d_co(c, depth_tree.get_depth(c), inv_mat, scale_factor)
             if not is_hole:
                 n_filled += 1
-
-        # Keep the user working on their line art, not on the matte layer
-        try:
-            gp_obj.data.layers.active = line_layer
-        except Exception:
-            pass
-
-        refresh_strokes(gp_obj, [frame_number])
         return n_filled

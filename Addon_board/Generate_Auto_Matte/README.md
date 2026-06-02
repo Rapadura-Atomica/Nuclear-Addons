@@ -11,9 +11,20 @@ Com um clique, ele preenche **todas as regiões fechadas** do seu line art com u
 3. Clique em **Generate Auto Matte**. No diálogo:
    - **Matte Color** — cor de preenchimento (cinza por padrão).
    - **Line Art Layer** — camada que define as regiões. Vazio = camada ativa.
+   - **Frames** — `Current Frame` (só o frame ativo) ou `All Keyframes` (gera a matte
+     para **todos os keyframes** da camada de line art de uma vez — segue a animação
+     inteira num clique; ex.: uma bola pulando vira matte em cada pose).
    - **Precision** — junta pontos próximos. Valores menores fecham buracos/frestas maiores no traço.
    - **Keep Holes** — recorta o espaço negativo interno (ex.: anéis) como buracos reais via material *holdout*.
-   - **Clear Previous Matte** — limpa a matte anterior do frame antes de gerar.
+   - **Clear Previous Matte** — limpa a matte anterior antes de gerar (em `All Keyframes`,
+     apaga todos os keyframes de matte antes para um re-bake limpo).
+
+### Animação (All Keyframes)
+
+Cada keyframe da camada de line art vira um keyframe correspondente na camada `AutoMatte`,
+no mesmo número de frame. Como os dados de cada keyframe do Grease Pencil são lidos
+diretamente, o bake não precisa percorrer/alterar o frame atual da cena — roda tudo de uma vez.
+Reaplicar com **Clear Previous Matte** ligado refaz a matte de toda a animação do zero.
 
 O resultado vai para a camada `AutoMatte` (criada automaticamente, atrás do line art), usando os materiais `AutoMatte` e `AutoMatte Holdout`.
 
