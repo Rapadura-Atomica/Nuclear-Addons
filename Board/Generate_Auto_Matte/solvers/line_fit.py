@@ -197,6 +197,9 @@ def smooth_and_resample(co, total_length, closed=False,
     """Full post-processing chain that turns the raw spine into a clean line."""
     P = laplacian_smooth(co, smooth_steps, closed)
     P = chaikin_smooth(P, chaikin_steps, closed)
+    # A final relaxation pass softens the small steps Chaikin leaves behind, which
+    # matters most on messy input where the raw spine zig-zags between strokes.
+    P = laplacian_smooth(P, 1, closed)
     if resample_length and resample_length > 0:
         P = resample_by_length(P, resample_length, closed)
     return P

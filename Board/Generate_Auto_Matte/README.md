@@ -43,8 +43,13 @@ linha concreta e suave — ideal para fechar um esboço sujo virando line art li
    - **Smooth** / **Roundness** — suavização (média de vértices) e arredondamento (corte de
      cantos Chaikin) da linha final.
    - **Resample / Spacing** — distribui os pontos de saída uniformemente.
+   - **Uniform Thickness / Thickness / Thickness Scale** — espessura da linha. Com *Uniform
+     Thickness* ligado (padrão) a linha tem espessura única; **Thickness** define o raio
+     (0 = usa a espessura média do rascunho) e **Thickness Scale** multiplica o resultado.
+     Desligue *Uniform Thickness* para herdar a pressão variável do traço original.
    - **Inherit Color** — herda a cor de vértice média dos traços originais.
-   - **Keep Original Strokes** — por padrão **substitui** o rascunho pela linha limpa; ligue
+   - **Keep Original Strokes** — por padrão **substitui** o rascunho pela linha limpa
+     (apaga exatamente os traços selecionados, identificados por hash estável); ligue
      para manter os traços originais.
 
 A linha resultante herda os atributos médios (pressão/espessura, opacidade, cor, UV) do

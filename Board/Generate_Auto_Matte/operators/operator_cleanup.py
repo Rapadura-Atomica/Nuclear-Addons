@@ -18,6 +18,10 @@ from ..solvers.line_fit import longest_path_spine, smooth_and_resample
 # stroke that inherits the averaged attributes of the originals.
 # ---------------------------------------------------------------------------
 
+# How many times the spine is pulled onto the centre of the sketch bundle. More
+# passes fuse loosely-drawn parallel strokes more aggressively.
+CENTROID_ITERATIONS = 2
+
 
 def _collect_points(stroke_list, t_mat, ignore_transparent):
     """Project every selected point to 2D and gather its attributes.
@@ -79,30 +83,33 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
                       closed, smooth_steps, chaikin_steps, resample_length):
     """Compute the cleaned-up polyline and its inherited attributes.
 
-    Returns (co2d, attrs) where co2d is an (M, 2) array and attrs maps each
-    attribute name to an (M,) / (M, 4) array, or (None, None) when the input is
+    Returns (co2d, attrs, mean_radius) where co2d is an (M, 2) array, attrs maps
+    each attribute name to an (M,) / (M, 4) array and mean_radius is the average
+    thickness of the original sketch. Returns (None, None, 0.0) when the input is
     too sparse to fit."""
     kdt, arr = _collect_points(stroke_list, t_mat, ignore_transparent)
     if kdt is None:
-        return None, None
+        return None, None, 0.0
 
     spine, total_length = longest_path_spine(arr['co'].tolist())
     if not spine:
-        return None, None
+        return None, None, 0.0
 
-    # Pull each spine point to the centroid of the surrounding sketch points.
+    # Pull the spine onto the centre of the surrounding sketch points, repeatedly.
     # This is what fuses several rough lines into one clean centreline.
-    centered = []
-    for c in spine:
-        idxs = _neighbor_indices(kdt, c, search_radius)
-        centered.append(arr['co'][idxs].mean(axis=0))
-    centered = np.asarray(centered, dtype=float)
+    centered = np.asarray(spine, dtype=float)
+    for _ in range(CENTROID_ITERATIONS):
+        moved = np.empty_like(centered)
+        for i, c in enumerate(centered):
+            idxs = _neighbor_indices(kdt, c, search_radius)
+            moved[i] = arr['co'][idxs].mean(axis=0)
+        centered = moved
 
     co2d = smooth_and_resample(centered, total_length, closed=closed,
                                smooth_steps=smooth_steps, chaikin_steps=chaikin_steps,
                                resample_length=resample_length)
     if len(co2d) < 2:
-        return None, None
+        return None, None, 0.0
 
     # Re-inherit point attributes onto the final, resampled line.
     m = len(co2d)
@@ -120,7 +127,21 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
         attrs['strength'][i] = arr['strength'][idxs].mean()
         attrs['uv_rotation'][i] = arr['uv_rotation'][idxs].mean()
         attrs['color'][i] = arr['color'][idxs].mean(axis=0)
-    return co2d, attrs
+
+    mean_radius = float(arr['pressure'].mean()) if len(arr['pressure']) else 0.0
+    return co2d, attrs, mean_radius
+
+
+def _delete_strokes(frame, target_strokes):
+    """Remove exactly the given strokes from a frame, identified by their stable
+    hash. Iterating indices in descending order keeps every remaining index valid
+    while the collection shrinks, so no stroke is ever skipped or mis-deleted."""
+    target_hashes = {s._hash for s in target_strokes}
+    strokes = frame.nijigp_strokes
+    for i in reversed(range(len(strokes))):
+        s = strokes[i]
+        if s._hash in target_hashes:
+            strokes.remove(s)
 
 
 class CleanupLinesOperator(bpy.types.Operator):
@@ -139,7 +160,7 @@ class CleanupLinesOperator(bpy.types.Operator):
     smooth_steps: bpy.props.IntProperty(
         name="Smooth",
         description="Amount of vertex averaging applied to the result",
-        default=2, min=0, max=20
+        default=4, min=0, max=20
     )  # type: ignore
     chaikin_steps: bpy.props.IntProperty(
         name="Roundness",
@@ -165,6 +186,23 @@ class CleanupLinesOperator(bpy.types.Operator):
         name="Ignore Transparent",
         default=False,
         description="Skip points with zero opacity when fitting"
+    )  # type: ignore
+    uniform_thickness: bpy.props.BoolProperty(
+        name="Uniform Thickness",
+        default=True,
+        description="Give the clean line a single, even thickness instead of inheriting "
+                    "the uneven pressure of the sketch"
+    )  # type: ignore
+    thickness: bpy.props.FloatProperty(
+        name="Thickness",
+        default=0.0, min=0.0, soft_max=0.5, precision=4,
+        description="Radius of the clean line when Uniform Thickness is on. "
+                    "0 keeps the average thickness of the original sketch"
+    )  # type: ignore
+    thickness_scale: bpy.props.FloatProperty(
+        name="Thickness Scale",
+        default=1.0, min=0.0, soft_max=5.0,
+        description="Multiply the final line thickness"
     )  # type: ignore
     inherit_color: bpy.props.BoolProperty(
         name="Inherit Color",
@@ -197,6 +235,12 @@ class CleanupLinesOperator(bpy.types.Operator):
         sub.enabled = self.resample
         sub.prop(self, "resample_length")
         col.separator()
+        col.label(text="Thickness:")
+        col.prop(self, "uniform_thickness")
+        if self.uniform_thickness:
+            col.prop(self, "thickness")
+        col.prop(self, "thickness_scale")
+        col.separator()
         col.label(text="Output:")
         col.prop(self, "inherit_color")
         col.prop(self, "keep_original")
@@ -214,7 +258,8 @@ class CleanupLinesOperator(bpy.types.Operator):
 
         stroke_list = get_input_strokes(gp_obj, frame)
         if len(stroke_list) < 1:
-            self.report({'WARNING'}, "Please select the sketch strokes to clean up.")
+            self.report({'WARNING'}, "Please select the sketch strokes to clean up "
+                                     "(on the active layer).")
             return {'CANCELLED'}
 
         current_mode = gp_obj.mode
@@ -227,7 +272,9 @@ class CleanupLinesOperator(bpy.types.Operator):
             search_radius = self.line_spacing / LINE_WIDTH_FACTOR
             resample_length = self.resample_length if self.resample else None
 
-            co2d, attrs = _fit_cleanup_line(
+            # Fit first -- this reads the original strokes, so it must run before
+            # any deletion.
+            co2d, attrs, mean_radius = _fit_cleanup_line(
                 stroke_list, t_mat, search_radius, self.ignore_transparent,
                 self.closed, self.smooth_steps, self.chaikin_steps, resample_length)
 
@@ -236,6 +283,19 @@ class CleanupLinesOperator(bpy.types.Operator):
                                          "Select more of the sketch or raise Merge Distance.")
                 return {'CANCELLED'}
 
+            # Work out the per-point radius (thickness) of the new line.
+            if self.uniform_thickness:
+                base = self.thickness if self.thickness > 1e-6 else (mean_radius or 0.02)
+                radii = np.full(len(co2d), base)
+            else:
+                radii = attrs['pressure'].copy()
+            radii = np.maximum(radii * self.thickness_scale, 1e-5)
+
+            # Replace the rough sketch first, so creating the clean line cannot
+            # interfere with the hashes used to identify the originals.
+            if not self.keep_original:
+                _delete_strokes(frame, stroke_list)
+
             new_stroke = frame.nijigp_strokes.new()
             new_stroke.material_index = gp_obj.active_material_index
             copy_stroke_attributes(new_stroke, stroke_list,
@@ -243,7 +303,7 @@ class CleanupLinesOperator(bpy.types.Operator):
             new_stroke.points.add(len(co2d))
             for i, point in enumerate(new_stroke.points):
                 point.co = restore_3d_co(co2d[i], attrs['depth'][i], inv_mat)
-                point.pressure = attrs['pressure'][i]
+                point.pressure = radii[i]
                 point.strength = attrs['strength'][i]
                 point.uv_rotation = attrs['uv_rotation'][i]
                 if self.inherit_color:
@@ -251,16 +311,11 @@ class CleanupLinesOperator(bpy.types.Operator):
             new_stroke.use_cyclic = self.closed
             new_stroke.select = True
 
-            # Replace the rough sketch unless the artist asked to keep it
-            if not self.keep_original:
-                originals = set(stroke_list)
-                for stroke in [s for s in frame.nijigp_strokes if s in originals]:
-                    frame.nijigp_strokes.remove(stroke)
-
             refresh_strokes(gp_obj, [frame.frame_number])
         finally:
             if gp_obj.mode != current_mode:
                 bpy.ops.object.mode_set(mode=current_mode)
 
-        self.report({'INFO'}, f"Cleanup: merged {len(stroke_list)} stroke(s) into one clean line.")
+        verb = "cleaned up" if self.keep_original else "merged"
+        self.report({'INFO'}, f"Cleanup: {verb} {len(stroke_list)} stroke(s) into one clean line.")
         return {'FINISHED'}
