@@ -15,6 +15,9 @@ class AutoMattePanelBase:
         col.prop(context.scene, "nijigp_working_plane", text="")
         col.separator()
         col.operator("gpencil.generate_auto_matte", icon='SHADING_SOLID')
+        col.separator()
+        col.label(text="Line Cleanup:")
+        col.operator("gpencil.automatte_cleanup_lines", icon='MOD_SMOOTH')
 
 
 class AUTOMATTE_PT_panel_paint(AutoMattePanelBase, bpy.types.Panel):

@@ -16,9 +16,9 @@ bl_info = {
     "name" : "Generate Auto Matte",
     "author" : "Rapadura Atômica LTDA (baseado em nijiGPen de chsh2)",
     "website" : "https://github.com/Rapadura-Atomica",
-    "description" : "One-click matte generation: fills every closed Grease Pencil region with a flat color on a dedicated AutoMatte layer. Made for board/storyboard work.",
+    "description" : "Board/storyboard toolkit: one-click matte generation (fills every closed region with a flat color) plus automatic line cleanup (merges rough sketch strokes into a single clean line).",
     "blender" : (4, 3, 0),
-    "version" : (1, 0, 0),
+    "version" : (1, 1, 0),
     "location" : "View3D > Sidebar > Auto Matte, in Grease Pencil Draw/Edit modes",
     "category" : "Object"
 }

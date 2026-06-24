@@ -1,8 +1,9 @@
 # Generate Auto Matte
 
-Addon de Grease Pencil para Blender (4.3+ / 5.0) focado em quem trabalha com **board / storyboard**.
+Addon de Grease Pencil para Blender (4.3+ / 5.0) focado em quem trabalha com **board / storyboard**. Reúne duas ferramentas:
 
-Com um clique, ele preenche **todas as regiões fechadas** do seu line art com uma cor chapada (cinza por padrão) numa camada dedicada chamada **`AutoMatte`**, posicionada atrás do desenho.
+- **Generate Auto Matte** — com um clique, preenche **todas as regiões fechadas** do seu line art com uma cor chapada (cinza por padrão) numa camada dedicada chamada **`AutoMatte`**, posicionada atrás do desenho.
+- **Cleanup Lines** — seleciona um amontoado de traços de **rascunho sujos/sobrepostos** e transforma em **uma única linha limpa e suave**.
 
 ## Como usar
 
@@ -27,6 +28,39 @@ diretamente, o bake não precisa percorrer/alterar o frame atual da cena — rod
 Reaplicar com **Clear Previous Matte** ligado refaz a matte de toda a animação do zero.
 
 O resultado vai para a camada `AutoMatte` (criada automaticamente, atrás do line art), usando os materiais `AutoMatte` e `AutoMatte Holdout`.
+
+## Cleanup Lines (limpeza de traço)
+
+Pega vários traços de rascunho que descrevem **uma mesma linha** e os funde numa única
+linha concreta e suave — ideal para fechar um esboço sujo virando line art limpo.
+
+1. Em modo **Edit**, selecione os traços de rascunho que formam a linha.
+2. Sidebar (`N`) → aba **Auto Matte** → **Cleanup Lines**. No diálogo:
+   - **Merge Distance** — traços mais próximos que isso são fundidos. Aumente para juntar um
+     amontoado mais solto/bagunçado.
+   - **Closed Shape** — trata a seleção como um laço fechado em vez de linha aberta.
+   - **Ignore Transparent** — ignora pontos com opacidade zero.
+   - **Smooth** / **Roundness** — suavização (média de vértices) e arredondamento (corte de
+     cantos Chaikin) da linha final.
+   - **Resample / Spacing** — distribui os pontos de saída uniformemente.
+   - **Inherit Color** — herda a cor de vértice média dos traços originais.
+   - **Keep Original Strokes** — por padrão **substitui** o rascunho pela linha limpa; ligue
+     para manter os traços originais.
+
+A linha resultante herda os atributos médios (pressão/espessura, opacidade, cor, UV) do
+rascunho. Funciona na camada e frame ativos.
+
+### Como funciona (sem SciPy)
+
+Reimplementa o *Single-Line Fit* do nijiGPen sem nenhuma dependência pesada (`solvers/line_fit.py`):
+
+1. **Triangulação Delaunay** dos pontos do rascunho (`mathutils.geometry`, nativo).
+2. **Árvore geradora mínima** euclidiana (Prim, Python puro) — substitui `scipy.sparse.csgraph`.
+3. **Caminho mais longo** na árvore (BFS duplo) = a "espinha" que melhor representa a linha.
+4. **Offset ao centroide** dos pontos vizinhos (`mathutils.kdtree`) — é o passo que **funde os
+   traços próximos** num único centro.
+5. **Suavização + reamostragem** (Laplaciano + Chaikin + por comprimento de arco) —
+   substitui o B-spline de `scipy.interpolate`.
 
 ## Por que é leve (sem dependências)
 
