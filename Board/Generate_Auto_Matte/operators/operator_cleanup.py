@@ -18,9 +18,10 @@ from ..solvers.line_fit import longest_path_spine, smooth_and_resample
 # stroke that inherits the averaged attributes of the originals.
 # ---------------------------------------------------------------------------
 
-# How many times the spine is pulled onto the centre of the sketch bundle. More
-# passes fuse loosely-drawn parallel strokes more aggressively.
-CENTROID_ITERATIONS = 2
+# How many times the spine is pulled onto the centre of the sketch bundle. One
+# pass centres the line among the strokes without dragging detail away; more
+# passes would start to over-smooth, which we deliberately avoid here.
+CENTROID_ITERATIONS = 1
 
 
 def _collect_points(stroke_list, t_mat, ignore_transparent):
@@ -159,18 +160,21 @@ class CleanupLinesOperator(bpy.types.Operator):
     )  # type: ignore
     smooth_steps: bpy.props.IntProperty(
         name="Smooth",
-        description="Amount of vertex averaging applied to the result",
-        default=4, min=0, max=20
+        description="Vertex averaging applied to the result. Keep it low to preserve the "
+                    "shape of the original sketch; raise it only if the line stays jittery",
+        default=1, min=0, max=20
     )  # type: ignore
     chaikin_steps: bpy.props.IntProperty(
         name="Roundness",
-        description="Corner-cutting passes. Higher values give a softer, more curved line",
-        default=2, min=0, max=4
+        description="Corner-cutting passes. 0 keeps every corner of the sketch; higher "
+                    "values give a softer, more rounded line",
+        default=1, min=0, max=4
     )  # type: ignore
     resample: bpy.props.BoolProperty(
         name="Resample",
-        default=True,
-        description="Distribute the output points evenly along the line"
+        default=False,
+        description="Redistribute the output points evenly. Off keeps the original point "
+                    "density (more detail); on simplifies to evenly spaced points"
     )  # type: ignore
     resample_length: bpy.props.FloatProperty(
         name="Spacing",

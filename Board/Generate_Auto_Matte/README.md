@@ -41,8 +41,11 @@ linha concreta e suave — ideal para fechar um esboço sujo virando line art li
    - **Closed Shape** — trata a seleção como um laço fechado em vez de linha aberta.
    - **Ignore Transparent** — ignora pontos com opacidade zero.
    - **Smooth** / **Roundness** — suavização (média de vértices) e arredondamento (corte de
-     cantos Chaikin) da linha final.
-   - **Resample / Spacing** — distribui os pontos de saída uniformemente.
+     cantos Chaikin). Padrões **baixos** (1/1) de propósito: a ideia é *unir* os traços
+     preservando o formato do desenho, não redesenhar como uma curva genérica. Aumente só
+     se a linha ficar trêmula.
+   - **Resample / Spacing** — **desligado** por padrão (mantém a densidade de pontos
+     original = mais detalhe). Ligue para simplificar em pontos igualmente espaçados.
    - **Uniform Thickness / Thickness / Thickness Scale** — espessura da linha. Com *Uniform
      Thickness* ligado (padrão) a linha tem espessura única; **Thickness** define o raio
      (0 = usa a espessura média do rascunho) e **Thickness Scale** multiplica o resultado.
