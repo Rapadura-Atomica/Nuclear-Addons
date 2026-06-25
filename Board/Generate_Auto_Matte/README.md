@@ -58,9 +58,30 @@ linha concreta e suave — ideal para fechar um esboço sujo virando line art li
 A linha resultante herda os atributos médios (pressão/espessura, opacidade, cor, UV) do
 rascunho. Funciona na camada e frame ativos.
 
+> **Cleanup Lines** funde **tudo que está selecionado em UMA linha**. Para um desenho com
+> várias linhas (ex.: um coqueiro com folhas, tronco e grama), use o **Multi** abaixo, ou
+> limpe um elemento de cada vez.
+
+### Cleanup Lines (Multi) — vários traços de uma vez
+
+Seleciona tudo, **agrupa** os traços por proximidade/direção e limpa **cada grupo na sua
+própria linha**. Ideal para fechar um desenho inteiro de uma vez.
+
+- **Group By** — como dividir a seleção em linhas:
+  - *Distance (Relative)* (padrão) — separa onde o vão é grande **relativo ao comprimento**
+    da linha (**Relative Gap**, %). Robusto para linhas de tamanhos diferentes.
+  - *Distance (Absolute)* — separa por uma distância fixa (**Absolute Gap**).
+  - *Max Lines* — no máximo N linhas (**Max Lines**), sem nunca fundir traços de direções
+    muito diferentes.
+- **Angular Tolerance** — traços com direções diferindo mais que isso nunca vão para a
+  mesma linha (evita juntar duas folhas que se cruzam).
+- As demais opções (Merge Distance, Shape, Thickness, Output) são as mesmas do Cleanup
+  Lines e se aplicam a **cada** linha gerada (cada uma com sua espessura média).
+
 ### Como funciona (sem SciPy)
 
-Reimplementa o *Single-Line Fit* do nijiGPen sem nenhuma dependência pesada (`solvers/line_fit.py`):
+Reimplementa o *Single-Line Fit* e o *Multi-Line (Cluster) Fit* do nijiGPen sem nenhuma
+dependência pesada (`solvers/line_fit.py` + `operators/operator_cleanup.py`):
 
 1. **Triangulação Delaunay** dos pontos do rascunho (`mathutils.geometry`, nativo).
 2. **Árvore geradora mínima** euclidiana (Prim, Python puro) — substitui `scipy.sparse.csgraph`.
@@ -69,6 +90,12 @@ Reimplementa o *Single-Line Fit* do nijiGPen sem nenhuma dependência pesada (`s
    traços próximos** num único centro.
 5. **Suavização + reamostragem** (Laplaciano + Chaikin + por comprimento de arco) —
    substitui o B-spline de `scipy.interpolate`.
+
+A **clusterização** (Multi) também dispensa o `scipy.cluster.hierarchy`: um corte por
+distância numa clusterização *single-linkage* equivale aos **componentes conexos** do grafo
+que liga pares de traços mais próximos que o limiar — então um **union-find** sobre esses
+pares dá o mesmo resultado. A similaridade entre dois traços (distância ponto-a-linha +
+tolerância angular) usa só `mathutils.kdtree` e numpy.
 
 ## Por que é leve (sem dependências)
 

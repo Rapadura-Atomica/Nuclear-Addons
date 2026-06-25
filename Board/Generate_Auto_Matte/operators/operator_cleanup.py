@@ -1,4 +1,5 @@
 import bpy
+import math
 import numpy as np
 from .common import *
 from ..utils import *
@@ -9,13 +10,17 @@ from ..solvers.line_fit import longest_path_spine, smooth_and_resample
 # ---------------------------------------------------------------------------
 # Automatic line cleanup
 #
-# Turns a bundle of rough, overlapping sketch strokes into a single clean line.
-# Based on nijiGPen's "Single-Line Fit" but reworked to need no SciPy: the heavy
-# maths (Euclidean MST, longest path, curve smoothing) lives in
-# ../solvers/line_fit.py as pure numpy. This file is the Blender glue -- it
-# projects the strokes to 2D, finds the centreline, pulls it to the middle of
-# the sketch bundle (the step that "merges" nearby lines) and writes out one
-# stroke that inherits the averaged attributes of the originals.
+# Turns rough, overlapping sketch strokes into clean lines. Based on nijiGPen's
+# "Single-Line Fit" and "Multi-Line (Cluster) Fit" but reworked to need no
+# SciPy: the heavy maths (Euclidean MST, longest path, smoothing) lives in
+# ../solvers/line_fit.py as pure numpy, and the hierarchical clustering is
+# replaced by single-linkage via union-find (a distance-cut single-linkage
+# dendrogram is exactly the connected components of the threshold graph).
+#
+# Two operators share everything here:
+#   * Cleanup Lines        -> all selected strokes become ONE clean line.
+#   * Cleanup Lines (Multi) -> selection is split into clusters of nearby/similar
+#                              strokes and each cluster becomes its own line.
 # ---------------------------------------------------------------------------
 
 # How many times the spine is pulled onto the centre of the sketch bundle. One
@@ -23,6 +28,13 @@ from ..solvers.line_fit import longest_path_spine, smooth_and_resample
 # passes would start to over-smooth, which we deliberately avoid here.
 CENTROID_ITERATIONS = 1
 
+# distance_to_another_stroke returns this when two lines are not comparable.
+NO_SIMILARITY = 65535.0
+
+
+# ---------------------------------------------------------------------------
+# Point gathering / fitting (single line)
+# ---------------------------------------------------------------------------
 
 def _collect_points(stroke_list, t_mat, ignore_transparent):
     """Project every selected point to 2D and gather its attributes.
@@ -82,11 +94,10 @@ def _neighbor_indices(kdt, co, radius):
 
 def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
                       closed, smooth_steps, chaikin_steps, resample_length):
-    """Compute the cleaned-up polyline and its inherited attributes.
+    """Compute the cleaned-up polyline and its inherited attributes for one
+    bundle of strokes.
 
-    Returns (co2d, attrs, mean_radius) where co2d is an (M, 2) array, attrs maps
-    each attribute name to an (M,) / (M, 4) array and mean_radius is the average
-    thickness of the original sketch. Returns (None, None, 0.0) when the input is
+    Returns (co2d, attrs, mean_radius) or (None, None, 0.0) when the input is
     too sparse to fit."""
     kdt, arr = _collect_points(stroke_list, t_mat, ignore_transparent)
     if kdt is None:
@@ -96,8 +107,8 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
     if not spine:
         return None, None, 0.0
 
-    # Pull the spine onto the centre of the surrounding sketch points, repeatedly.
-    # This is what fuses several rough lines into one clean centreline.
+    # Pull the spine onto the centre of the surrounding sketch points. This is
+    # what fuses several rough lines into one clean centreline.
     centered = np.asarray(spine, dtype=float)
     for _ in range(CENTROID_ITERATIONS):
         moved = np.empty_like(centered)
@@ -112,7 +123,6 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
     if len(co2d) < 2:
         return None, None, 0.0
 
-    # Re-inherit point attributes onto the final, resampled line.
     m = len(co2d)
     attrs = {
         'depth': np.empty(m),
@@ -133,6 +143,133 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
     return co2d, attrs, mean_radius
 
 
+# ---------------------------------------------------------------------------
+# Stroke similarity + clustering (multi line), dependency-free
+# ---------------------------------------------------------------------------
+
+def _stroke_kdtree(co_list):
+    kdt = kdtree.KDTree(len(co_list))
+    for i, c in enumerate(co_list):
+        kdt.insert(xy0(c), i)
+    kdt.balance()
+    return kdt
+
+
+def _polyline_length(co_list):
+    total = 0.0
+    for i in range(1, len(co_list)):
+        a, b = co_list[i - 1], co_list[i]
+        total += math.hypot(b[0] - a[0], b[1] - a[1])
+    return total
+
+
+def _polyline_distance(co_list1, co_list2, kdt2, angular_tolerance):
+    """Similarity cost between two polylines (ported from nijiGPen's
+    distance_to_another_stroke). Low = similar; NO_SIMILARITY = unrelated or
+    differing direction by more than angular_tolerance."""
+    n1, n2 = len(co_list1), len(co_list2)
+    if n1 < 2 or n2 < 2:
+        return NO_SIMILARITY
+
+    idx_arr = np.zeros(n1, dtype=int)
+    dist_arr = np.zeros(n1)
+    for i in range(n1):
+        _, idx_arr[i], dist_arr[i] = kdt2.find(xy0(co_list1[i]))
+
+    contact_idx1 = int(np.argmin(dist_arr))
+    contact_idx2 = min(int(idx_arr[contact_idx1]), n2 - 2)
+    contact_idx1 = min(contact_idx1, n1 - 2)
+    direction1 = Vector(co_list1[contact_idx1 + 1]) - Vector(co_list1[contact_idx1])
+    direction2 = Vector(co_list2[contact_idx2 + 1]) - Vector(co_list2[contact_idx2])
+    if math.isclose(direction1.length, 0) or math.isclose(direction2.length, 0):
+        angle_diff = 0.0
+    else:
+        angle_diff = direction1.angle(direction2)
+
+    end2 = n2 - 1
+    if angle_diff > math.pi / 2:        # lines drawn in opposite directions still match
+        angle_diff = math.pi - angle_diff
+        end2 = 0
+    if angle_diff > angular_tolerance:
+        return NO_SIMILARITY
+
+    total_cost, total_count = 0.0, 0.0
+    for i in range(n1):
+        total_cost += dist_arr[i]
+        total_count += 1
+        if idx_arr[i] == end2:
+            break
+    return total_cost / total_count if total_count else NO_SIMILARITY
+
+
+def _cluster_strokes(stroke_list, t_mat, criterion, cluster_dist, cluster_ratio,
+                     cluster_num, angular_tolerance):
+    """Split strokes into clusters of nearby/similar lines.
+
+    Single-linkage clustering: a distance-cut dendrogram equals the connected
+    components of the graph that links stroke pairs closer than the threshold,
+    so a union-find over those pairs gives the same result without SciPy.
+    Returns a list of stroke lists, ordered by drawing sequence."""
+    n = len(stroke_list)
+    poly_list, _, _ = get_2d_co_from_strokes(stroke_list, t_mat, scale=False)
+    kdts = [_stroke_kdtree(p) for p in poly_list]
+    lengths = [_polyline_length(p) for p in poly_list]
+
+    edges = []  # (cost, i, j)
+    for i in range(n):
+        for j in range(i + 1, n):
+            d1 = _polyline_distance(poly_list[i], poly_list[j], kdts[j], angular_tolerance)
+            d2 = _polyline_distance(poly_list[j], poly_list[i], kdts[i], angular_tolerance)
+            d = min(d1, d2)
+            if criterion == 'RATIO' and d < NO_SIMILARITY:
+                denom = 0.5 * (lengths[i] + lengths[j]) or 1e-9
+                d = d / denom
+            edges.append((d, i, j))
+
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+            return True
+        return False
+
+    if criterion == 'NUM':
+        comps = n
+        for d, i, j in sorted(edges, key=lambda e: e[0]):
+            if d >= NO_SIMILARITY or comps <= cluster_num:
+                break
+            if union(i, j):
+                comps -= 1
+    else:
+        threshold = cluster_dist if criterion == 'DIST' else cluster_ratio / 100.0
+        for d, i, j in edges:
+            if d < threshold:
+                union(i, j)
+
+    # Group, ordered by the index of each cluster's first-drawn stroke.
+    clusters = {}
+    order = {}
+    for i in range(n):
+        root = find(i)
+        if root not in clusters:
+            clusters[root] = []
+            order[root] = i
+        clusters[root].append(stroke_list[i])
+    return [clusters[r] for r in sorted(clusters, key=lambda r: order[r])]
+
+
+# ---------------------------------------------------------------------------
+# Output
+# ---------------------------------------------------------------------------
+
 def _delete_strokes(frame, target_strokes):
     """Remove exactly the given strokes from a frame, identified by their stable
     hash. Iterating indices in descending order keeps every remaining index valid
@@ -145,13 +282,39 @@ def _delete_strokes(frame, target_strokes):
             strokes.remove(s)
 
 
-class CleanupLinesOperator(bpy.types.Operator):
-    """Merge the selected rough sketch strokes into a single clean, smooth line"""
-    bl_idname = "gpencil.automatte_cleanup_lines"
-    bl_label = "Cleanup Lines"
-    bl_category = 'View'
-    bl_options = {'REGISTER', 'UNDO'}
+def _create_clean_stroke(frame, gp_obj, co2d, attrs, mean_radius, inv_mat,
+                         src_strokes, cfg):
+    """Build one clean stroke from a fit result. cfg is the operator (read-only)."""
+    if cfg.uniform_thickness:
+        base = cfg.thickness if cfg.thickness > 1e-6 else (mean_radius or 0.02)
+        radii = np.full(len(co2d), base)
+    else:
+        radii = attrs['pressure'].copy()
+    radii = np.maximum(radii * cfg.thickness_scale, 1e-5)
 
+    new_stroke = frame.nijigp_strokes.new()
+    new_stroke.material_index = gp_obj.active_material_index
+    copy_stroke_attributes(new_stroke, src_strokes,
+                           copy_cap=True, copy_uv=True, copy_color=cfg.inherit_color)
+    new_stroke.points.add(len(co2d))
+    for i, point in enumerate(new_stroke.points):
+        point.co = restore_3d_co(co2d[i], attrs['depth'][i], inv_mat)
+        point.pressure = radii[i]
+        point.strength = attrs['strength'][i]
+        point.uv_rotation = attrs['uv_rotation'][i]
+        if cfg.inherit_color:
+            point.vertex_color = tuple(attrs['color'][i])
+    new_stroke.use_cyclic = cfg.closed
+    new_stroke.select = True
+    return new_stroke
+
+
+# ---------------------------------------------------------------------------
+# Shared operator properties
+# ---------------------------------------------------------------------------
+
+class _CleanupConfig:
+    """Fit + output options shared by the single- and multi-line operators."""
     line_spacing: bpy.props.IntProperty(
         name="Merge Distance",
         description="Sketch lines closer than this are fused into one. Increase it to "
@@ -184,7 +347,7 @@ class CleanupLinesOperator(bpy.types.Operator):
     closed: bpy.props.BoolProperty(
         name="Closed Shape",
         default=False,
-        description="Treat the selection as a closed loop instead of an open line"
+        description="Treat each line as a closed loop instead of an open line"
     )  # type: ignore
     ignore_transparent: bpy.props.BoolProperty(
         name="Ignore Transparent",
@@ -223,13 +386,7 @@ class CleanupLinesOperator(bpy.types.Operator):
     def poll(cls, context):
         return context.object is not None and obj_is_gp(context.object)
 
-    def draw(self, context):
-        layout = self.layout
-        col = layout.column()
-        col.prop(self, "line_spacing")
-        col.prop(self, "closed")
-        col.prop(self, "ignore_transparent")
-        col.separator()
+    def _draw_fit_options(self, col):
         col.label(text="Shape:")
         col.prop(self, "smooth_steps")
         col.prop(self, "chaikin_steps")
@@ -249,72 +406,68 @@ class CleanupLinesOperator(bpy.types.Operator):
         col.prop(self, "inherit_color")
         col.prop(self, "keep_original")
 
-    def execute(self, context):
+    def _resolve_target(self, context):
+        """Return (layer, frame, selected_strokes) or (None, None, msg)."""
         gp_obj = context.object
         layer = gp_obj.data.layers.active
         if layer is None:
-            self.report({'WARNING'}, "Please select a layer.")
-            return {'CANCELLED'}
+            return None, None, "Please select a layer."
         frame = layer.active_frame
         if not is_frame_valid(frame):
-            self.report({'WARNING'}, "The active layer has no drawing on this frame.")
-            return {'CANCELLED'}
-
+            return None, None, "The active layer has no drawing on this frame."
         stroke_list = get_input_strokes(gp_obj, frame)
         if len(stroke_list) < 1:
-            self.report({'WARNING'}, "Please select the sketch strokes to clean up "
-                                     "(on the active layer).")
+            return None, None, "Please select the sketch strokes to clean up (on the active layer)."
+        return layer, frame, stroke_list
+
+
+# ---------------------------------------------------------------------------
+# Operators
+# ---------------------------------------------------------------------------
+
+class CleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
+    """Merge the selected rough sketch strokes into a single clean, smooth line"""
+    bl_idname = "gpencil.automatte_cleanup_lines"
+    bl_label = "Cleanup Lines"
+    bl_category = 'View'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.prop(self, "line_spacing")
+        col.prop(self, "closed")
+        col.prop(self, "ignore_transparent")
+        col.separator()
+        self._draw_fit_options(col)
+
+    def execute(self, context):
+        gp_obj = context.object
+        _, frame, stroke_list = self._resolve_target(context)
+        if frame is None:
+            self.report({'WARNING'}, stroke_list)  # stroke_list holds the message here
             return {'CANCELLED'}
 
         current_mode = gp_obj.mode
         if current_mode != 'OBJECT':
             bpy.ops.object.mode_set(mode='OBJECT')
-
         try:
             t_mat, inv_mat = get_transformation_mat(mode=context.scene.nijigp_working_plane,
                                                     gp_obj=gp_obj, strokes=stroke_list)
             search_radius = self.line_spacing / LINE_WIDTH_FACTOR
             resample_length = self.resample_length if self.resample else None
 
-            # Fit first -- this reads the original strokes, so it must run before
-            # any deletion.
             co2d, attrs, mean_radius = _fit_cleanup_line(
                 stroke_list, t_mat, search_radius, self.ignore_transparent,
                 self.closed, self.smooth_steps, self.chaikin_steps, resample_length)
-
             if co2d is None:
                 self.report({'WARNING'}, "Not enough stroke detail to fit a line. "
                                          "Select more of the sketch or raise Merge Distance.")
                 return {'CANCELLED'}
 
-            # Work out the per-point radius (thickness) of the new line.
-            if self.uniform_thickness:
-                base = self.thickness if self.thickness > 1e-6 else (mean_radius or 0.02)
-                radii = np.full(len(co2d), base)
-            else:
-                radii = attrs['pressure'].copy()
-            radii = np.maximum(radii * self.thickness_scale, 1e-5)
-
-            # Replace the rough sketch first, so creating the clean line cannot
-            # interfere with the hashes used to identify the originals.
             if not self.keep_original:
                 _delete_strokes(frame, stroke_list)
-
-            new_stroke = frame.nijigp_strokes.new()
-            new_stroke.material_index = gp_obj.active_material_index
-            copy_stroke_attributes(new_stroke, stroke_list,
-                                   copy_cap=True, copy_uv=True, copy_color=self.inherit_color)
-            new_stroke.points.add(len(co2d))
-            for i, point in enumerate(new_stroke.points):
-                point.co = restore_3d_co(co2d[i], attrs['depth'][i], inv_mat)
-                point.pressure = radii[i]
-                point.strength = attrs['strength'][i]
-                point.uv_rotation = attrs['uv_rotation'][i]
-                if self.inherit_color:
-                    point.vertex_color = tuple(attrs['color'][i])
-            new_stroke.use_cyclic = self.closed
-            new_stroke.select = True
-
+            _create_clean_stroke(frame, gp_obj, co2d, attrs, mean_radius, inv_mat,
+                                 stroke_list, self)
             refresh_strokes(gp_obj, [frame.frame_number])
         finally:
             if gp_obj.mode != current_mode:
@@ -322,4 +475,114 @@ class CleanupLinesOperator(bpy.types.Operator):
 
         verb = "cleaned up" if self.keep_original else "merged"
         self.report({'INFO'}, f"Cleanup: {verb} {len(stroke_list)} stroke(s) into one clean line.")
+        return {'FINISHED'}
+
+
+class ClusterCleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
+    """Split the selection into clusters of nearby/similar strokes and clean each cluster into its own line"""
+    bl_idname = "gpencil.automatte_cluster_cleanup"
+    bl_label = "Cleanup Lines (Multi)"
+    bl_category = 'View'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    cluster_criterion: bpy.props.EnumProperty(
+        name="Group By",
+        items=[('RATIO', 'Distance (Relative)', 'Split where the gap is large relative to the line length'),
+               ('DIST', 'Distance (Absolute)', 'Split where the gap exceeds a fixed distance'),
+               ('NUM', 'Max Lines', 'Allow at most this many clusters')],
+        default='RATIO',
+        description="How the selected strokes are divided into separate lines"
+    )  # type: ignore
+    cluster_ratio: bpy.props.FloatProperty(
+        name="Relative Gap",
+        default=5.0, min=0.0, soft_max=100.0, subtype='PERCENTAGE',
+        description="Strokes split into different lines when their gap is larger than this "
+                    "share of the line length"
+    )  # type: ignore
+    cluster_dist: bpy.props.FloatProperty(
+        name="Absolute Gap",
+        default=0.05, min=0.0, unit='LENGTH',
+        description="Strokes split into different lines when their gap exceeds this distance"
+    )  # type: ignore
+    cluster_num: bpy.props.IntProperty(
+        name="Max Lines",
+        default=8, min=1,
+        description="Maximum number of clean lines to produce"
+    )  # type: ignore
+    angular_tolerance: bpy.props.FloatProperty(
+        name="Angular Tolerance",
+        default=math.pi / 3, min=math.pi / 18, max=math.pi / 2, unit='ROTATION',
+        description="Strokes whose directions differ by more than this are never put in the same line"
+    )  # type: ignore
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.label(text="Clustering:")
+        col.prop(self, "cluster_criterion")
+        if self.cluster_criterion == 'RATIO':
+            col.prop(self, "cluster_ratio")
+        elif self.cluster_criterion == 'DIST':
+            col.prop(self, "cluster_dist")
+        else:
+            col.prop(self, "cluster_num")
+        col.prop(self, "angular_tolerance")
+        col.separator()
+        col.label(text="Input:")
+        col.prop(self, "line_spacing")
+        col.prop(self, "closed")
+        col.prop(self, "ignore_transparent")
+        col.separator()
+        self._draw_fit_options(col)
+
+    def execute(self, context):
+        gp_obj = context.object
+        _, frame, stroke_list = self._resolve_target(context)
+        if frame is None:
+            self.report({'WARNING'}, stroke_list)
+            return {'CANCELLED'}
+        if len(stroke_list) < 2:
+            self.report({'WARNING'}, "Select at least 2 strokes (use Cleanup Lines for a single line).")
+            return {'CANCELLED'}
+
+        current_mode = gp_obj.mode
+        if current_mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            t_mat, inv_mat = get_transformation_mat(mode=context.scene.nijigp_working_plane,
+                                                    gp_obj=gp_obj, strokes=stroke_list)
+            search_radius = self.line_spacing / LINE_WIDTH_FACTOR
+            resample_length = self.resample_length if self.resample else None
+
+            clusters = _cluster_strokes(stroke_list, t_mat, self.cluster_criterion,
+                                        self.cluster_dist, self.cluster_ratio,
+                                        self.cluster_num, self.angular_tolerance)
+
+            # Fit every cluster first (reads the originals), then delete and emit.
+            results = []
+            for cl in clusters:
+                co2d, attrs, mean_radius = _fit_cleanup_line(
+                    cl, t_mat, search_radius, self.ignore_transparent,
+                    self.closed, self.smooth_steps, self.chaikin_steps, resample_length)
+                if co2d is not None:
+                    results.append((co2d, attrs, mean_radius, cl))
+
+            if not results:
+                self.report({'WARNING'}, "Could not fit any cluster. Try raising Merge Distance "
+                                         "or selecting cleaner strokes.")
+                return {'CANCELLED'}
+
+            if not self.keep_original:
+                fitted = [s for (_, _, _, cl) in results for s in cl]
+                _delete_strokes(frame, fitted)
+
+            for co2d, attrs, mean_radius, cl in results:
+                _create_clean_stroke(frame, gp_obj, co2d, attrs, mean_radius, inv_mat, cl, self)
+
+            refresh_strokes(gp_obj, [frame.frame_number])
+        finally:
+            if gp_obj.mode != current_mode:
+                bpy.ops.object.mode_set(mode=current_mode)
+
+        self.report({'INFO'}, f"Cleanup (Multi): {len(stroke_list)} stroke(s) -> "
+                              f"{len(results)} clean line(s).")
         return {'FINISHED'}

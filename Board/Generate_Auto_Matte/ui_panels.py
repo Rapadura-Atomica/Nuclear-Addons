@@ -17,7 +17,8 @@ class AutoMattePanelBase:
         col.operator("gpencil.generate_auto_matte", icon='SHADING_SOLID')
         col.separator()
         col.label(text="Line Cleanup:")
-        col.operator("gpencil.automatte_cleanup_lines", icon='MOD_SMOOTH')
+        col.operator("gpencil.automatte_cleanup_lines", text="Cleanup Lines", icon='MOD_SMOOTH')
+        col.operator("gpencil.automatte_cluster_cleanup", text="Cleanup Lines (Multi)", icon='STROKE')
 
 
 class AUTOMATTE_PT_panel_paint(AutoMattePanelBase, bpy.types.Panel):
