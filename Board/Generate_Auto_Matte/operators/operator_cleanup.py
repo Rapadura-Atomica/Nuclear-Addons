@@ -92,8 +92,37 @@ def _neighbor_indices(kdt, co, radius):
     return [idx]
 
 
+def _trim_loose_ends(spine, kdt, radius, factor):
+    """Trim the sketchy overshoots at the two ends of the spine.
+
+    The longest path ends at the two farthest points of the sketch, which often
+    sit on a stray hook drawn by a single stroke rather than on the overlapping
+    bundle. We measure how many original points sit near each spine point
+    ('support') and walk inward from each end, dropping the low-support tail
+    until support rises to a fraction of the line's own median. Only the ends are
+    touched, so a genuinely thin line (uniform low support) keeps its length."""
+    n = len(spine)
+    if n < 8 or factor <= 0:
+        return spine
+    support = [len(kdt.find_range(xy0(c), radius)) for c in spine]
+    threshold = max(2.0, float(np.median(support)) * factor)
+
+    lo = 0
+    while lo < n and support[lo] < threshold:
+        lo += 1
+    hi = n - 1
+    while hi > lo and support[hi] < threshold:
+        hi -= 1
+
+    # Never trim the line away: keep a reasonable minimum length.
+    if hi - lo + 1 < max(4, n // 3):
+        return spine
+    return spine[lo:hi + 1]
+
+
 def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
-                      closed, smooth_steps, chaikin_steps, resample_length):
+                      closed, smooth_steps, chaikin_steps, resample_length,
+                      trim_factor=0.0):
     """Compute the cleaned-up polyline and its inherited attributes for one
     bundle of strokes.
 
@@ -106,6 +135,10 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
     spine, total_length = longest_path_spine(arr['co'].tolist())
     if not spine:
         return None, None, 0.0
+
+    # Cut the loose, crooked overshoots at the ends (open lines only).
+    if not closed and trim_factor > 0:
+        spine = _trim_loose_ends(spine, kdt, search_radius, trim_factor)
 
     # Pull the spine onto the centre of the surrounding sketch points. This is
     # what fuses several rough lines into one clean centreline.
@@ -354,6 +387,18 @@ class _CleanupConfig:
         default=False,
         description="Skip points with zero opacity when fitting"
     )  # type: ignore
+    trim_ends: bpy.props.BoolProperty(
+        name="Trim Loose Ends",
+        default=True,
+        description="Cut the sketchy overshoots ('hooks') at the ends of the line, where the "
+                    "sketch thins out to a single stray stroke"
+    )  # type: ignore
+    trim_amount: bpy.props.FloatProperty(
+        name="Trim Amount",
+        default=0.5, min=0.0, max=1.0, subtype='FACTOR',
+        description="How aggressively the loose ends are trimmed. Higher cuts back further "
+                    "into the line; 0 disables trimming"
+    )  # type: ignore
     uniform_thickness: bpy.props.BoolProperty(
         name="Uniform Thickness",
         default=True,
@@ -388,6 +433,11 @@ class _CleanupConfig:
 
     def _draw_fit_options(self, col):
         col.label(text="Shape:")
+        row = col.row()
+        row.prop(self, "trim_ends")
+        sub = row.row()
+        sub.enabled = self.trim_ends
+        sub.prop(self, "trim_amount")
         col.prop(self, "smooth_steps")
         col.prop(self, "chaikin_steps")
         row = col.row()
@@ -456,9 +506,11 @@ class CleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
             search_radius = self.line_spacing / LINE_WIDTH_FACTOR
             resample_length = self.resample_length if self.resample else None
 
+            trim_factor = self.trim_amount if self.trim_ends else 0.0
             co2d, attrs, mean_radius = _fit_cleanup_line(
                 stroke_list, t_mat, search_radius, self.ignore_transparent,
-                self.closed, self.smooth_steps, self.chaikin_steps, resample_length)
+                self.closed, self.smooth_steps, self.chaikin_steps, resample_length,
+                trim_factor)
             if co2d is None:
                 self.report({'WARNING'}, "Not enough stroke detail to fit a line. "
                                          "Select more of the sketch or raise Merge Distance.")
@@ -558,11 +610,13 @@ class ClusterCleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
                                         self.cluster_num, self.angular_tolerance)
 
             # Fit every cluster first (reads the originals), then delete and emit.
+            trim_factor = self.trim_amount if self.trim_ends else 0.0
             results = []
             for cl in clusters:
                 co2d, attrs, mean_radius = _fit_cleanup_line(
                     cl, t_mat, search_radius, self.ignore_transparent,
-                    self.closed, self.smooth_steps, self.chaikin_steps, resample_length)
+                    self.closed, self.smooth_steps, self.chaikin_steps, resample_length,
+                    trim_factor)
                 if co2d is not None:
                     results.append((co2d, attrs, mean_radius, cl))
 

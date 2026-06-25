@@ -18,7 +18,7 @@ bl_info = {
     "website" : "https://github.com/Rapadura-Atomica",
     "description" : "Board/storyboard toolkit: one-click matte generation (fills every closed region with a flat color) plus automatic line cleanup (merge rough sketch strokes into clean lines, single or multi-line).",
     "blender" : (4, 3, 0),
-    "version" : (1, 2, 0),
+    "version" : (1, 3, 0),
     "location" : "View3D > Sidebar > Auto Matte, in Grease Pencil Draw/Edit modes",
     "category" : "Object"
 }

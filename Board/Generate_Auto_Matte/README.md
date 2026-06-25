@@ -40,6 +40,10 @@ linha concreta e suave — ideal para fechar um esboço sujo virando line art li
      amontoado mais solto/bagunçado.
    - **Closed Shape** — trata a seleção como um laço fechado em vez de linha aberta.
    - **Ignore Transparent** — ignora pontos com opacidade zero.
+   - **Trim Loose Ends / Trim Amount** — corta as "pontas soltas e tortas" (overshoots/
+     ganchos) nas extremidades, onde o rascunho afina para um único traço perdido. Ligado
+     por padrão; **Trim Amount** controla o quanto recua (0 = não apara). Só apara as
+     **pontas** — o miolo e linhas finas uniformes são preservados.
    - **Smooth** / **Roundness** — suavização (média de vértices) e arredondamento (corte de
      cantos Chaikin). Padrões **baixos** (1/1) de propósito: a ideia é *unir* os traços
      preservando o formato do desenho, não redesenhar como uma curva genérica. Aumente só
