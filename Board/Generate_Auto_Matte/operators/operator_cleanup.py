@@ -132,23 +132,32 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
     if kdt is None:
         return None, None, 0.0
 
-    spine, total_length = longest_path_spine(arr['co'].tolist())
-    if not spine:
-        return None, None, 0.0
+    single = len(stroke_list) == 1
+    if single:
+        # A lone stroke is already an ordered path -- keep its own points instead of
+        # re-deriving a spine, so its curve is preserved exactly (no flattening).
+        spine = arr['co'].tolist()
+        total_length = _polyline_length(spine)
+    else:
+        spine, total_length = longest_path_spine(arr['co'].tolist())
+        if not spine:
+            return None, None, 0.0
 
     # Cut the loose, crooked overshoots at the ends (open lines only).
     if not closed and trim_factor > 0:
         spine = _trim_loose_ends(spine, kdt, search_radius, trim_factor)
 
-    # Pull the spine onto the centre of the surrounding sketch points. This is
-    # what fuses several rough lines into one clean centreline.
+    # Pull the spine onto the centre of the surrounding sketch points -- the step
+    # that fuses several rough lines into one clean centreline. Skipped for a lone
+    # stroke, where averaging the line against itself would only flatten its curve.
     centered = np.asarray(spine, dtype=float)
-    for _ in range(CENTROID_ITERATIONS):
-        moved = np.empty_like(centered)
-        for i, c in enumerate(centered):
-            idxs = _neighbor_indices(kdt, c, search_radius)
-            moved[i] = arr['co'][idxs].mean(axis=0)
-        centered = moved
+    if not single:
+        for _ in range(CENTROID_ITERATIONS):
+            moved = np.empty_like(centered)
+            for i, c in enumerate(centered):
+                idxs = _neighbor_indices(kdt, c, search_radius)
+                moved[i] = arr['co'][idxs].mean(axis=0)
+            centered = moved
 
     co2d = smooth_and_resample(centered, total_length, closed=closed,
                                smooth_steps=smooth_steps, chaikin_steps=chaikin_steps,
@@ -172,8 +181,10 @@ def _fit_cleanup_line(stroke_list, t_mat, search_radius, ignore_transparent,
         attrs['uv_rotation'][i] = arr['uv_rotation'][idxs].mean()
         attrs['color'][i] = arr['color'][idxs].mean(axis=0)
 
-    mean_radius = float(arr['pressure'].mean()) if len(arr['pressure']) else 0.0
-    return co2d, attrs, mean_radius
+    # 80th percentile (not the mean) so a single merged line reads as boldly as the
+    # overlapping sketch did, instead of washing out to a thin average.
+    base_radius = float(np.percentile(arr['pressure'], 80)) if len(arr['pressure']) else 0.0
+    return co2d, attrs, base_radius
 
 
 # ---------------------------------------------------------------------------
@@ -235,29 +246,32 @@ def _polyline_distance(co_list1, co_list2, kdt2, angular_tolerance):
     return total_cost / total_count if total_count else NO_SIMILARITY
 
 
+def _coverage(co_list1, kdt2, max_dist):
+    """Fraction of co_list1's points that lie within max_dist of the other stroke.
+
+    Unlike _polyline_distance (which only needs the two lines to *touch* at one
+    point and therefore chains a whole connected drawing into one blob), coverage
+    asks how much of one line actually runs alongside the other -- so it merges
+    genuine duplicates of the same line while keeping distinct lines apart."""
+    n = len(co_list1)
+    if n < 2:
+        return 0.0
+    return sum(1 for c in co_list1 if kdt2.find(xy0(c))[2] <= max_dist) / n
+
+
 def _cluster_strokes(stroke_list, t_mat, criterion, cluster_dist, cluster_ratio,
-                     cluster_num, angular_tolerance):
+                     cluster_num, angular_tolerance, cov_distance, cov_fraction):
     """Split strokes into clusters of nearby/similar lines.
 
-    Single-linkage clustering: a distance-cut dendrogram equals the connected
-    components of the graph that links stroke pairs closer than the threshold,
-    so a union-find over those pairs gives the same result without SciPy.
-    Returns a list of stroke lists, ordered by drawing sequence."""
+    COVERAGE (default) merges strokes that overlap over a large fraction of their
+    length -- robust against the single-linkage chaining that collapses connected
+    drawings. The distance-based criteria use single-linkage clustering, which
+    equals the connected components of the threshold graph (a union-find over
+    stroke pairs), so no SciPy is needed. Returns stroke lists in drawing order."""
     n = len(stroke_list)
     poly_list, _, _ = get_2d_co_from_strokes(stroke_list, t_mat, scale=False)
     kdts = [_stroke_kdtree(p) for p in poly_list]
     lengths = [_polyline_length(p) for p in poly_list]
-
-    edges = []  # (cost, i, j)
-    for i in range(n):
-        for j in range(i + 1, n):
-            d1 = _polyline_distance(poly_list[i], poly_list[j], kdts[j], angular_tolerance)
-            d2 = _polyline_distance(poly_list[j], poly_list[i], kdts[i], angular_tolerance)
-            d = min(d1, d2)
-            if criterion == 'RATIO' and d < NO_SIMILARITY:
-                denom = 0.5 * (lengths[i] + lengths[j]) or 1e-9
-                d = d / denom
-            edges.append((d, i, j))
 
     parent = list(range(n))
 
@@ -274,18 +288,37 @@ def _cluster_strokes(stroke_list, t_mat, criterion, cluster_dist, cluster_ratio,
             return True
         return False
 
-    if criterion == 'NUM':
-        comps = n
-        for d, i, j in sorted(edges, key=lambda e: e[0]):
-            if d >= NO_SIMILARITY or comps <= cluster_num:
-                break
-            if union(i, j):
-                comps -= 1
+    if criterion == 'COVERAGE':
+        for i in range(n):
+            for j in range(i + 1, n):
+                cov = max(_coverage(poly_list[i], kdts[j], cov_distance),
+                          _coverage(poly_list[j], kdts[i], cov_distance))
+                if cov >= cov_fraction:
+                    union(i, j)
     else:
-        threshold = cluster_dist if criterion == 'DIST' else cluster_ratio / 100.0
-        for d, i, j in edges:
-            if d < threshold:
-                union(i, j)
+        edges = []  # (cost, i, j)
+        for i in range(n):
+            for j in range(i + 1, n):
+                d1 = _polyline_distance(poly_list[i], poly_list[j], kdts[j], angular_tolerance)
+                d2 = _polyline_distance(poly_list[j], poly_list[i], kdts[i], angular_tolerance)
+                d = min(d1, d2)
+                if criterion == 'RATIO' and d < NO_SIMILARITY:
+                    denom = 0.5 * (lengths[i] + lengths[j]) or 1e-9
+                    d = d / denom
+                edges.append((d, i, j))
+
+        if criterion == 'NUM':
+            comps = n
+            for d, i, j in sorted(edges, key=lambda e: e[0]):
+                if d >= NO_SIMILARITY or comps <= cluster_num:
+                    break
+                if union(i, j):
+                    comps -= 1
+        else:
+            threshold = cluster_dist if criterion == 'DIST' else cluster_ratio / 100.0
+            for d, i, j in edges:
+                if d < threshold:
+                    union(i, j)
 
     # Group, ordered by the index of each cluster's first-drawn stroke.
     clusters = {}
@@ -539,11 +572,24 @@ class ClusterCleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
 
     cluster_criterion: bpy.props.EnumProperty(
         name="Group By",
-        items=[('RATIO', 'Distance (Relative)', 'Split where the gap is large relative to the line length'),
+        items=[('COVERAGE', 'Overlap', 'Merge strokes that run alongside each other over a large '
+                                       'fraction of their length. Best for inking over a sketch'),
+               ('RATIO', 'Distance (Relative)', 'Split where the gap is large relative to the line length'),
                ('DIST', 'Distance (Absolute)', 'Split where the gap exceeds a fixed distance'),
                ('NUM', 'Max Lines', 'Allow at most this many clusters')],
-        default='RATIO',
+        default='COVERAGE',
         description="How the selected strokes are divided into separate lines"
+    )  # type: ignore
+    cov_fraction: bpy.props.FloatProperty(
+        name="Min Overlap",
+        default=50.0, min=10.0, max=100.0, subtype='PERCENTAGE',
+        description="Two strokes merge into one line only if this much of one runs alongside "
+                    "the other. Lower merges more aggressively"
+    )  # type: ignore
+    cov_distance: bpy.props.FloatProperty(
+        name="Overlap Distance",
+        default=0.06, min=0.001, soft_max=0.5, unit='LENGTH',
+        description="How close two strokes must be to count as running alongside each other"
     )  # type: ignore
     cluster_ratio: bpy.props.FloatProperty(
         name="Relative Gap",
@@ -571,13 +617,18 @@ class ClusterCleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
         col = self.layout.column()
         col.label(text="Clustering:")
         col.prop(self, "cluster_criterion")
-        if self.cluster_criterion == 'RATIO':
+        if self.cluster_criterion == 'COVERAGE':
+            col.prop(self, "cov_fraction")
+            col.prop(self, "cov_distance")
+        elif self.cluster_criterion == 'RATIO':
             col.prop(self, "cluster_ratio")
+            col.prop(self, "angular_tolerance")
         elif self.cluster_criterion == 'DIST':
             col.prop(self, "cluster_dist")
+            col.prop(self, "angular_tolerance")
         else:
             col.prop(self, "cluster_num")
-        col.prop(self, "angular_tolerance")
+            col.prop(self, "angular_tolerance")
         col.separator()
         col.label(text="Input:")
         col.prop(self, "line_spacing")
@@ -607,7 +658,8 @@ class ClusterCleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
 
             clusters = _cluster_strokes(stroke_list, t_mat, self.cluster_criterion,
                                         self.cluster_dist, self.cluster_ratio,
-                                        self.cluster_num, self.angular_tolerance)
+                                        self.cluster_num, self.angular_tolerance,
+                                        self.cov_distance, self.cov_fraction / 100.0)
 
             # Fit every cluster first (reads the originals), then delete and emit.
             trim_factor = self.trim_amount if self.trim_ends else 0.0

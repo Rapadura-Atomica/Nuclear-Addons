@@ -72,13 +72,16 @@ Seleciona tudo, **agrupa** os traços por proximidade/direção e limpa **cada g
 própria linha**. Ideal para fechar um desenho inteiro de uma vez.
 
 - **Group By** — como dividir a seleção em linhas:
-  - *Distance (Relative)* (padrão) — separa onde o vão é grande **relativo ao comprimento**
-    da linha (**Relative Gap**, %). Robusto para linhas de tamanhos diferentes.
-  - *Distance (Absolute)* — separa por uma distância fixa (**Absolute Gap**).
-  - *Max Lines* — no máximo N linhas (**Max Lines**), sem nunca fundir traços de direções
-    muito diferentes.
-- **Angular Tolerance** — traços com direções diferindo mais que isso nunca vão para a
-  mesma linha (evita juntar duas folhas que se cruzam).
+  - *Overlap* (**padrão**) — funde traços que **correm lado a lado por boa parte do
+    comprimento** (duplicatas da mesma linha). **Min Overlap** (%) = quanto de um traço
+    precisa acompanhar o outro; **Overlap Distance** = o quão perto contam como "lado a
+    lado". É o modo ideal para inking sobre rascunho: evita o efeito de "tudo vira uma
+    linha só" que os critérios por distância sofrem num desenho conectado (ex.: folhas que
+    se encontram no centro do coqueiro).
+  - *Distance (Relative)* — separa onde o vão é grande relativo ao comprimento (**Relative
+    Gap**, %). + **Angular Tolerance**.
+  - *Distance (Absolute)* — separa por distância fixa (**Absolute Gap**). + **Angular Tolerance**.
+  - *Max Lines* — no máximo N linhas, sem fundir direções muito diferentes. + **Angular Tolerance**.
 - As demais opções (Merge Distance, Shape, Thickness, Output) são as mesmas do Cleanup
   Lines e se aplicam a **cada** linha gerada (cada uma com sua espessura média).
 
@@ -95,11 +98,18 @@ dependência pesada (`solvers/line_fit.py` + `operators/operator_cleanup.py`):
 5. **Suavização + reamostragem** (Laplaciano + Chaikin + por comprimento de arco) —
    substitui o B-spline de `scipy.interpolate`.
 
-A **clusterização** (Multi) também dispensa o `scipy.cluster.hierarchy`: um corte por
-distância numa clusterização *single-linkage* equivale aos **componentes conexos** do grafo
-que liga pares de traços mais próximos que o limiar — então um **union-find** sobre esses
-pares dá o mesmo resultado. A similaridade entre dois traços (distância ponto-a-linha +
-tolerância angular) usa só `mathutils.kdtree` e numpy.
+A **clusterização** (Multi) também dispensa o `scipy.cluster.hierarchy`. O critério padrão
+**Overlap (cobertura)** funde dois traços só se uma fração grande de um corre dentro de uma
+distância do outro — isso evita o "chaining" do *single-linkage* (em um desenho conectado,
+todo traço encosta em algum vizinho e o limiar acaba fundindo tudo numa linha só). Os
+critérios por distância usam *single-linkage*, que equivale aos **componentes conexos** do
+grafo de proximidade (um **union-find**). Toda a similaridade usa só `mathutils.kdtree` e numpy.
+
+**Preservar a forma:** um cluster de **um único traço** mantém os próprios pontos (sem
+re-derivar espinha nem offset ao centroide, que achatariam a curva) — só apara pontas e
+suaviza de leve. O offset ao centroide (que funde) só roda quando há vários traços. A
+espessura uniforme automática usa o **percentil 80** do raio do rascunho (não a média), pra
+a linha única não sair mais fina que o traço empilhado original.
 
 ## Por que é leve (sem dependências)
 
