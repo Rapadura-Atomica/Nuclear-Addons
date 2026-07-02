@@ -1,20 +1,40 @@
+import os
+import sys
 import math
 import numpy as np
 
 # ---------------------------------------------------------------------------
-# Skeleton-based line cleanup (dependency-free)
+# Skeleton-based line cleanup
 #
-# Instead of clustering *strokes* (which cannot tell a crossing tick from a real
-# line and always leaves strays), this works on the *ink*: rasterise every
-# selected stroke into a mask, thin it to a 1px centreline (Zhang-Suen), trace
-# continuous lines through the junctions and prune the short spurs (the ticks).
-# The result unifies overlapping scribbles into one clean line automatically,
-# with almost no parameters. Pure numpy -- Blender already ships it.
+# Works on the *ink*, not the strokes: rasterise every selected stroke into a
+# mask, clean it, thin it to a 1px centreline and decompose that into graph
+# branches (each frond = one branch from a tip to the crown). This unifies
+# overlapping scribbles into a single clean line and drops crossing ticks --
+# which stroke clustering can never do reliably.
+#
+# Robustness comes from SciPy + scikit-image (bundled under ./dependencias):
+# scipy.ndimage for morphology / hole filling and skimage.morphology.skeletonize
+# for a clean, barb-free skeleton. If they are unavailable we fall back to a
+# pure-numpy Zhang-Suen thinning so the feature still runs (lower quality).
 # ---------------------------------------------------------------------------
 
+_DEPS = os.path.join(os.path.dirname(os.path.dirname(__file__)), "dependencias")
+if os.path.isdir(_DEPS) and _DEPS not in sys.path:
+    sys.path.insert(0, _DEPS)
+
+try:
+    from scipy import ndimage as _ndi
+    from skimage.morphology import skeletonize as _skeletonize
+    HAVE_SKIMAGE = True
+except Exception:
+    HAVE_SKIMAGE = False
+
+
+# ---------------------------------------------------------------------------
+# Rasterisation
+# ---------------------------------------------------------------------------
 
 def _rasterize(polylines, minx, miny, scale, margin, H, W, dilation_px):
-    # Draw thin (1px) polylines with vectorised fancy indexing...
     thin = np.zeros((H, W), np.uint8)
     for p in polylines:
         arr = np.asarray(p, dtype=float)
@@ -25,7 +45,6 @@ def _rasterize(polylines, minx, miny, scale, margin, H, W, dilation_px):
             cc = np.clip(np.linspace(cols[k], cols[k + 1], n).astype(int), 0, W - 1)
             rr = np.clip(np.linspace(rows[k], rows[k + 1], n).astype(int), 0, H - 1)
             thin[rr, cc] = 1
-    # ...then dilate the whole mask at once with roll-OR (margin keeps it off the edges).
     r = max(1, int(round(dilation_px)))
     oy, ox = np.mgrid[-r:r + 1, -r:r + 1]
     doff = np.argwhere(ox * ox + oy * oy <= r * r) - r
@@ -36,15 +55,37 @@ def _rasterize(polylines, minx, miny, scale, margin, H, W, dilation_px):
     return img
 
 
-def _fill_holes(img, max_area_frac):
-    """Fill only the SMALL interior holes of the ink mask.
+# ---------------------------------------------------------------------------
+# Mask cleanup + skeletonisation
+# ---------------------------------------------------------------------------
 
-    Two diverging scribbles of one line enclose a small gap; left alone, thinning
-    keeps a loop around it. Filling that hole makes the line a solid blob -> one
-    centreline. But large enclosed regions (the space between neighbouring lines,
-    e.g. between fronds) must stay open, or the lines would merge -- so holes above
-    max_area_frac of the image are left untouched. Pure numpy: flood the background
-    from the border, then BFS-label the unreached holes and fill the small ones."""
+def _fill_small_holes_sci(mask, max_area):
+    filled = _ndi.binary_fill_holes(mask)
+    holes = filled & ~mask
+    lbl, n = _ndi.label(holes)
+    if n == 0:
+        return mask
+    sizes = _ndi.sum(np.ones_like(lbl, dtype=float), lbl, index=range(1, n + 1))
+    keep = np.array([0] + [1 if s < max_area else 0 for s in sizes], dtype=bool)
+    return mask | keep[lbl]
+
+
+def _skeleton_sci(img, close_px, max_hole_area):
+    mask = img.astype(bool)
+    if close_px >= 1:
+        st = np.ones((2 * close_px + 1, 2 * close_px + 1), bool)
+        mask = _ndi.binary_closing(mask, structure=st)
+    mask = _fill_small_holes_sci(mask, max_hole_area)
+    return skeletonize_wrapper(mask)
+
+
+def skeletonize_wrapper(mask):
+    return _skeletonize(mask).astype(np.uint8)
+
+
+# --- pure-numpy fallback ----------------------------------------------------
+
+def _fill_holes_np(img, max_area_frac):
     H, W = img.shape
     bg = (img == 0)
     reach = np.zeros_like(bg)
@@ -52,19 +93,15 @@ def _fill_holes(img, max_area_frac):
     reach[:, 0] = bg[:, 0]; reach[:, -1] = bg[:, -1]
     while True:
         grown = reach.copy()
-        grown[1:, :] |= reach[:-1, :]
-        grown[:-1, :] |= reach[1:, :]
-        grown[:, 1:] |= reach[:, :-1]
-        grown[:, :-1] |= reach[:, 1:]
+        grown[1:, :] |= reach[:-1, :]; grown[:-1, :] |= reach[1:, :]
+        grown[:, 1:] |= reach[:, :-1]; grown[:, :-1] |= reach[:, 1:]
         grown &= bg
         if grown.sum() == reach.sum():
             break
         reach = grown
-
     holes = set(map(tuple, np.argwhere(bg & ~reach)))
     max_area = max_area_frac * H * W
-    out = img.copy()
-    seen = set()
+    out = img.copy(); seen = set()
     for hp in holes:
         if hp in seen:
             continue
@@ -82,7 +119,6 @@ def _fill_holes(img, max_area_frac):
 
 
 def _zhang_suen(img):
-    """Vectorised Zhang-Suen thinning to a 1px skeleton."""
     im = img.copy()
     while True:
         total = 0
@@ -105,112 +141,107 @@ def _zhang_suen(img):
             cond[0, :] = cond[-1, :] = cond[:, 0] = cond[:, -1] = False
             m = int(cond.sum())
             if m:
-                im[cond] = 0
-                total += m
+                im[cond] = 0; total += m
         if total == 0:
             break
     return im
 
 
-def _trace_branches(skel):
-    """Decompose the skeleton into graph branches.
+# ---------------------------------------------------------------------------
+# Skeleton -> clean graph branches (junction clustering)
+# ---------------------------------------------------------------------------
 
-    Nodes are pixels of degree != 2 (tips = degree 1, junctions = degree >= 3);
-    a branch is the degree-2 chain between two nodes. Each frond of a palm is a
-    branch from the crown junction to a tip, so emitting branches keeps every
-    frond whole -- unlike a greedy tracer, which runs straight through the crown
-    and merges opposite fronds. Returns (branches, tips)."""
-    P = skel
-    skset = set(map(tuple, np.argwhere(P == 1)))
+def _neigh8(p):
+    r, c = p
+    return [(r + dr, c + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)
+            if not (dr == 0 and dc == 0)]
 
-    def nbrs(p):
-        r, c = p
-        return [(r + dr, c + dc) for dr in (-1, 0, 1) for dc in (-1, 0, 1)
-                if not (dr == 0 and dc == 0) and (r + dr, c + dc) in skset]
 
-    deg = {p: len(nbrs(p)) for p in skset}
-    nodeset = {p for p in skset if deg[p] != 2}
-    tips = {p for p in skset if deg[p] == 1}
+def _components(pixset):
+    comps = []; seen = set()
+    for s in pixset:
+        if s in seen:
+            continue
+        comp = set(); stack = [s]; seen.add(s)
+        while stack:
+            p = stack.pop(); comp.add(p)
+            for q in _neigh8(p):
+                if q in pixset and q not in seen:
+                    seen.add(q); stack.append(q)
+        comps.append(comp)
+    return comps
+
+
+def _trace_branches(skel, min_spur_px):
+    """Group junction pixels into nodes, cut them out, take the remaining
+    components as branches and reattach each end to its node centroid. Prune
+    short spur branches (ticks). Returns pixel paths (floats for centroids)."""
+    skset = set(map(tuple, np.argwhere(skel == 1)))
+    if len(skset) < 4:
+        return []
+
+    def sk_nbrs(p):
+        return [q for q in _neigh8(p) if q in skset]
+
+    deg = {p: len(sk_nbrs(p)) for p in skset}
+    junc = {p for p in skset if deg[p] >= 3}
+
+    jc_of = {}; centroids = []
+    for cid, cl in enumerate(_components(junc)):
+        for p in cl:
+            jc_of[p] = cid
+        centroids.append((sum(p[0] for p in cl) / len(cl),
+                          sum(p[1] for p in cl) / len(cl)))
+
+    arc = skset - junc
+
+    def arc_nbrs(p, comp):
+        return [q for q in _neigh8(p) if q in comp]
+
+    def order(comp):
+        ends = [p for p in comp if len(arc_nbrs(p, comp)) <= 1]
+        start = ends[0] if ends else next(iter(comp))
+        path = [start]; vis = {start}; cur = start
+        while True:
+            nx = [q for q in arc_nbrs(cur, comp) if q not in vis]
+            if not nx:
+                break
+            nx.sort(key=lambda q: (q[0] - cur[0]) ** 2 + (q[1] - cur[1]) ** 2)
+            cur = nx[0]; vis.add(cur); path.append(cur)
+        return path
+
+    def adj_node(p):
+        for q in _neigh8(p):
+            if q in jc_of:
+                return jc_of[q]
+        return None
 
     branches = []
-    used = set()          # interior (degree-2) pixels already consumed
-    for nd in nodeset:
-        for nb in nbrs(nd):
-            if nb in used:
-                continue
-            path = [nd]; prev = nd; cur = nb
-            while True:
-                path.append(cur)
-                if cur in nodeset:
-                    break
-                used.add(cur)
-                nxt = [q for q in nbrs(cur) if q != prev]
-                if not nxt:
-                    break
-                prev, cur = cur, nxt[0]
-            branches.append(path)
-
-    # node-node branches get walked from both ends -> keep one of each
-    seen = set(); uniq = []
-    for b in branches:
-        a, z = b[0], b[-1]
-        key = (min(a, z), max(a, z), len(b))
-        if key in seen:
+    for comp in _components(arc):
+        if len(comp) < 3:
             continue
-        seen.add(key); uniq.append(b)
-    if not uniq and skset:                       # pure loop, no nodes
-        uniq = [list(skset)]
-    return uniq, tips
+        path = order(comp)
+        if len(path) < 10:                       # drop crown specks
+            continue
+        hj, tj = adj_node(path[0]), adj_node(path[-1])
+        free_tip = hj is None or tj is None
+        if free_tip and len(path) < min_spur_px:
+            continue
+        full = ([centroids[hj]] if hj is not None else []) + path + \
+               ([centroids[tj]] if tj is not None else [])
+        branches.append(full)
+
+    if not branches and skset:
+        branches = [order(skset)]
+    return branches
 
 
-def _tangent(path, at_start):
-    """Unit direction pointing outward from the given end of the path."""
-    k = min(5, len(path) - 1)
-    if at_start:
-        a, b = path[k], path[0]
-    else:
-        a, b = path[-1 - k], path[-1]
-    d = (b[0] - a[0], b[1] - a[1]); n = math.hypot(*d) or 1
-    return (d[0] / n, d[1] / n)
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
-
-def _stitch(paths, gap, ang_cos):
-    """Greedily join path endpoints that are close and roughly collinear, so the
-    lines fragmented at junctions (e.g. fronds meeting a crown) become continuous."""
-    paths = [list(p) for p in paths]
-    while True:
-        best = None
-        for i in range(len(paths)):
-            for si in (True, False):
-                pi = paths[i][0] if si else paths[i][-1]
-                ti = _tangent(paths[i], si)
-                for j in range(len(paths)):
-                    if j == i:
-                        continue
-                    for sj in (True, False):
-                        pj = paths[j][0] if sj else paths[j][-1]
-                        gd = math.hypot(pi[0] - pj[0], pi[1] - pj[1])
-                        if gd > gap:
-                            continue
-                        tj = _tangent(paths[j], sj)
-                        # outward tangents should be roughly opposite for a smooth join
-                        if (ti[0] * tj[0] + ti[1] * tj[1]) < -ang_cos:
-                            if best is None or gd < best[0]:
-                                best = (gd, i, si, j, sj)
-        if best is None:
-            return paths
-        _, i, si, j, sj = best
-        A = paths[i][::-1] if si else paths[i]     # A ends at the join point
-        B = paths[j] if sj else paths[j][::-1]      # B starts at the join point
-        newp = A + B
-        for k in sorted((i, j), reverse=True):
-            paths.pop(k)
-        paths.append(newp)
-
-
-def extract_centerlines(polylines, dilation_px=3, resolution=520,
-                        min_spur_px=25, stitch_gap_px=16, stitch_angle_deg=50,
-                        fill_area_frac=0.01):
+def extract_centerlines(polylines, dilation_px=2, resolution=560,
+                        min_spur_px=26, close_px=0):
     """Return clean centrelines (each a list of (x, y) in the 2D working plane)
     from a set of sketchy input polylines (also in plane coords)."""
     pts = np.array([(float(c[0]), float(c[1])) for p in polylines for c in p])
@@ -225,28 +256,18 @@ def extract_centerlines(polylines, dilation_px=3, resolution=520,
     H = int((maxy - miny) * scale) + 2 * margin
 
     img = _rasterize(polylines, minx, miny, scale, margin, H, W, dilation_px)
-    img = _fill_holes(img, fill_area_frac)
-    skel = _zhang_suen(img)
-    branches, tips = _trace_branches(skel)
 
-    # Keep structural branches (junction-to-junction) whole; drop only the short
-    # spurs (a branch ending at a tip that is shorter than min_spur = a tick).
-    kept = []
-    for b in branches:
-        if len(b) < 6:
-            continue
-        is_spur = (b[0] in tips) or (b[-1] in tips)
-        if is_spur and len(b) < min_spur_px:
-            continue
-        kept.append(b)
+    max_hole_area = 0.004 * H * W
+    if HAVE_SKIMAGE:
+        skel = _skeleton_sci(img, close_px, max_hole_area)
+    else:
+        img = _fill_holes_np(img, 0.004)
+        skel = _zhang_suen(img)
 
-    # Reconnect branches whose endpoints are close and collinear, so a line split
-    # at a junction (e.g. the trunk crossed by a frond) reads as one stroke.
-    if stitch_gap_px > 0:
-        kept = _stitch(kept, stitch_gap_px, math.cos(math.radians(stitch_angle_deg)))
+    branches = _trace_branches(skel, min_spur_px)
 
     out = []
-    for p in kept:
+    for p in branches:
         out.append([(minx + (c - margin) / scale, miny + (r - margin) / scale)
                     for (r, c) in p])
     return out

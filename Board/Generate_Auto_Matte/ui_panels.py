@@ -17,8 +17,11 @@ class AutoMattePanelBase:
         col.operator("gpencil.generate_auto_matte", icon='SHADING_SOLID')
         col.separator()
         col.label(text="Line Cleanup:")
-        col.operator("gpencil.automatte_cleanup_lines", text="Cleanup Lines", icon='MOD_SMOOTH')
-        col.operator("gpencil.automatte_cluster_cleanup", text="Cleanup Lines (Multi)", icon='STROKE')
+        col.operator("gpencil.automatte_skeleton_cleanup", text="Cleanup Lines (Ink)", icon='OUTLINER_OB_GREASEPENCIL')
+        sub = col.column(align=True)
+        sub.label(text="Legacy (stroke-based):")
+        sub.operator("gpencil.automatte_cleanup_lines", text="Cleanup Lines", icon='MOD_SMOOTH')
+        sub.operator("gpencil.automatte_cluster_cleanup", text="Cleanup Lines (Multi)", icon='STROKE')
 
 
 class AUTOMATTE_PT_panel_paint(AutoMattePanelBase, bpy.types.Panel):

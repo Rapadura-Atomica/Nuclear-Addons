@@ -692,3 +692,117 @@ class ClusterCleanupLinesOperator(_CleanupConfig, bpy.types.Operator):
         self.report({'INFO'}, f"Cleanup (Multi): {len(stroke_list)} stroke(s) -> "
                               f"{len(results)} clean line(s).")
         return {'FINISHED'}
+
+
+def _create_plain_stroke(frame, gp_obj, co2d, thickness, inv_mat, depth, color):
+    """Create one clean stroke from a centreline (uniform thickness, one colour)."""
+    ns = frame.nijigp_strokes.new()
+    ns.material_index = gp_obj.active_material_index
+    ns.points.add(len(co2d))
+    for pt, xy in zip(ns.points, co2d):
+        pt.co = restore_3d_co((float(xy[0]), float(xy[1])), depth, inv_mat)
+        pt.pressure = thickness
+        pt.strength = 1.0
+        if color is not None:
+            pt.vertex_color = color
+    ns.select = True
+    return ns
+
+
+class SkeletonCleanupOperator(_CleanupConfig, bpy.types.Operator):
+    """Ink-based cleanup: unify all the selected sketchy strokes into clean centre-lines,
+    absorbing crossing ticks. The most robust mode -- best for turning a rough sketch into inked line art"""
+    bl_idname = "gpencil.automatte_skeleton_cleanup"
+    bl_label = "Cleanup Lines (Ink)"
+    bl_category = 'View'
+    bl_options = {'REGISTER', 'UNDO'}
+
+    ink_merge: bpy.props.IntProperty(
+        name="Ink Merge",
+        description="How thickly the ink is grown before finding its centre-line. Higher "
+                    "fuses looser scribbles into one line, but can merge nearby lines",
+        default=2, min=1, max=8
+    )  # type: ignore
+    min_detail: bpy.props.IntProperty(
+        name="Min Detail",
+        description="Drop stray branches shorter than this (removes ticks and specks). "
+                    "Higher removes more small detail",
+        default=26, min=4, soft_max=120
+    )  # type: ignore
+
+    def draw(self, context):
+        col = self.layout.column()
+        col.prop(self, "ink_merge")
+        col.prop(self, "min_detail")
+        col.separator()
+        col.label(text="Shape:")
+        col.prop(self, "smooth_steps")
+        col.prop(self, "chaikin_steps")
+        col.separator()
+        col.label(text="Thickness:")
+        col.prop(self, "thickness")
+        col.prop(self, "thickness_scale")
+        col.separator()
+        col.prop(self, "inherit_color")
+        col.prop(self, "keep_original")
+
+    def execute(self, context):
+        try:
+            from ..solvers.skeleton import extract_centerlines, HAVE_SKIMAGE
+        except Exception as e:
+            self.report({'ERROR'}, f"Skeleton solver unavailable: {e}")
+            return {'CANCELLED'}
+
+        gp_obj = context.object
+        _, frame, stroke_list = self._resolve_target(context)
+        if frame is None:
+            self.report({'WARNING'}, stroke_list)
+            return {'CANCELLED'}
+
+        current_mode = gp_obj.mode
+        if current_mode != 'OBJECT':
+            bpy.ops.object.mode_set(mode='OBJECT')
+        try:
+            t_mat, inv_mat = get_transformation_mat(mode=context.scene.nijigp_working_plane,
+                                                    gp_obj=gp_obj, strokes=stroke_list)
+            poly_list, depth_list, _ = get_2d_co_from_strokes(stroke_list, t_mat, scale=False)
+            pl = [[(float(c[0]), float(c[1])) for c in p] for p in poly_list]
+
+            lines = extract_centerlines(pl, dilation_px=self.ink_merge, min_spur_px=self.min_detail)
+            if not lines:
+                self.report({'WARNING'}, "Nothing to clean up. Select the sketch strokes first.")
+                return {'CANCELLED'}
+
+            # uniform thickness (bolder 80th percentile) + average depth / colour
+            radii = np.array([pt.pressure for s in stroke_list for pt in s.points])
+            base = self.thickness if self.thickness > 1e-6 else (
+                float(np.percentile(radii, 80)) if len(radii) else 0.02)
+            thickness = max(base * self.thickness_scale, 1e-5)
+            depth = float(np.mean([d for dl in depth_list for d in dl])) if depth_list else 0.0
+            color = None
+            if self.inherit_color:
+                cols = np.array([tuple(pt.vertex_color) for s in stroke_list for pt in s.points])
+                color = tuple(cols.mean(axis=0)) if len(cols) else None
+
+            if not self.keep_original:
+                _delete_strokes(frame, stroke_list)
+
+            made = 0
+            for ln in lines:
+                co = smooth_and_resample(np.array(ln, dtype=float), 0.0, closed=False,
+                                         smooth_steps=self.smooth_steps,
+                                         chaikin_steps=max(2, self.chaikin_steps),
+                                         resample_length=0.02)
+                if len(co) < 2:
+                    continue
+                _create_plain_stroke(frame, gp_obj, co, thickness, inv_mat, depth, color)
+                made += 1
+
+            refresh_strokes(gp_obj, [frame.frame_number])
+        finally:
+            if gp_obj.mode != current_mode:
+                bpy.ops.object.mode_set(mode=current_mode)
+
+        engine = "ink skeleton" if HAVE_SKIMAGE else "numpy fallback"
+        self.report({'INFO'}, f"Cleanup (Ink): {len(stroke_list)} stroke(s) -> {made} line(s) [{engine}].")
+        return {'FINISHED'}

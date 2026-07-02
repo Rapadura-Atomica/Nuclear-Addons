@@ -219,3 +219,5 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+# Auto Matte bundled scientific deps (scipy/scikit-image) — installed locally, not committed (238MB)
+Board/Generate_Auto_Matte/dependencias/

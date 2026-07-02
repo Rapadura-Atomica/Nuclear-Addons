@@ -29,7 +29,25 @@ Reaplicar com **Clear Previous Matte** ligado refaz a matte de toda a animação
 
 O resultado vai para a camada `AutoMatte` (criada automaticamente, atrás do line art), usando os materiais `AutoMatte` e `AutoMatte Holdout`.
 
-## Cleanup Lines (limpeza de traço)
+## Cleanup Lines (Ink) — recomendado
+
+Cleanup por **tinta** (esqueleto), o modo mais robusto para transformar um rascunho sujo em
+line art limpo. Em vez de agrupar traços, ele rasteriza toda a tinta selecionada, afina até a
+**linha central** e a decompõe em linhas limpas — **unificando** rabiscos sobrepostos numa
+linha só e **absorvendo os ticks** que cruzam. Quase sem parâmetro:
+
+1. Em **Edit**, selecione o desenho (pode ser tudo de uma vez).
+2. Sidebar → **Auto Matte** → **Cleanup Lines (Ink)**.
+   - **Ink Merge** — quão grossa a tinta é engrossada antes de achar o centro. Maior funde
+     rabiscos mais soltos, mas pode grudar linhas próximas.
+   - **Min Detail** — descarta galhos curtos (ticks/specks). Maior remove mais detalhe pequeno.
+   - **Thickness / Scale**, **Inherit Color**, **Keep Original** como nos outros modos.
+
+Usa `scipy` + `scikit-image` (ver `dependencias_INSTALL.md`); sem elas, cai num afinamento
+Zhang-Suen em numpy puro (funciona, qualidade menor). Os modos abaixo são **legados**
+(baseados em traço) e não precisam de dependências.
+
+## Cleanup Lines (legado, baseado em traço)
 
 Pega vários traços de rascunho que descrevem **uma mesma linha** e os funde numa única
 linha concreta e suave — ideal para fechar um esboço sujo virando line art limpo.
