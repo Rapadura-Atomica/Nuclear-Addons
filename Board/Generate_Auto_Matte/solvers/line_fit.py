@@ -204,3 +204,218 @@ def smooth_and_resample(co, total_length, closed=False,
     if resample_length and resample_length > 0:
         P = resample_by_length(P, resample_length, closed)
     return P
+
+
+# ---------------------------------------------------------------------------
+# Bézier straightening (Schneider's algorithm, dependency-free)
+#
+# The Ink cleanup rasterises strokes and thins them to a 1px skeleton, so its
+# centrelines carry stair-step pixel noise and never read as truly straight.
+# Fitting cubic Béziers to that centreline with an error tolerance collapses
+# each near-straight run into a single smooth segment (splitting only at real
+# corners), which is exactly what "make the lines as straight as possible" asks
+# for. We then sample the fitted curve back into a Grease Pencil polyline and
+# drop the collinear samples, so straight runs end up with very few points.
+#
+# fit_bezier is a numpy port of Philip J. Schneider's "An Algorithm for
+# Automatically Fitting Digitized Curves" (Graphics Gems, 1990): least-squares
+# fit of one cubic, Newton-Raphson reparameterisation, recursive split at the
+# point of maximum error. No SciPy, consistent with the rest of this solver.
+# ---------------------------------------------------------------------------
+
+def _normalize(v):
+    n = float(np.hypot(v[0], v[1]))
+    return v / n if n > 1e-12 else np.zeros(2)
+
+
+def _bezier_point(bez, t):
+    mt = 1.0 - t
+    return (mt * mt * mt) * bez[0] + 3 * (mt * mt * t) * bez[1] \
+        + 3 * (mt * t * t) * bez[2] + (t * t * t) * bez[3]
+
+
+def _bezier_prime(bez, t):
+    mt = 1.0 - t
+    return 3 * (mt * mt) * (bez[1] - bez[0]) + 6 * (mt * t) * (bez[2] - bez[1]) \
+        + 3 * (t * t) * (bez[3] - bez[2])
+
+
+def _bezier_prime2(bez, t):
+    mt = 1.0 - t
+    return 6 * mt * (bez[2] - 2 * bez[1] + bez[0]) + 6 * t * (bez[3] - 2 * bez[2] + bez[1])
+
+
+def _bezier_arclen(bez, samples=16):
+    ts = np.linspace(0.0, 1.0, samples)
+    pts = np.array([_bezier_point(bez, t) for t in ts])
+    return float(np.linalg.norm(np.diff(pts, axis=0), axis=1).sum())
+
+
+def _chord_length_parameterize(points):
+    d = np.linalg.norm(np.diff(points, axis=0), axis=1)
+    u = np.concatenate([[0.0], np.cumsum(d)])
+    if u[-1] <= 1e-12:
+        return np.linspace(0.0, 1.0, len(points))
+    return u / u[-1]
+
+
+def _generate_bezier(points, u, left_tan, right_tan):
+    """Least-squares fit of a single cubic to points at parameters u, with the
+    two endpoint tangents fixed."""
+    first, last = points[0], points[-1]
+    A = np.zeros((len(u), 2, 2))
+    A[:, 0] = np.outer(3 * (1 - u) ** 2 * u, left_tan)
+    A[:, 1] = np.outer(3 * (1 - u) * u ** 2, right_tan)
+
+    C = np.zeros((2, 2))
+    X = np.zeros(2)
+    line = [first, first, last, last]
+    for i, (pt, ui) in enumerate(zip(points, u)):
+        C[0, 0] += np.dot(A[i, 0], A[i, 0])
+        C[0, 1] += np.dot(A[i, 0], A[i, 1])
+        C[1, 0] = C[0, 1]
+        C[1, 1] += np.dot(A[i, 1], A[i, 1])
+        tmp = pt - _bezier_point(line, ui)
+        X[0] += np.dot(A[i, 0], tmp)
+        X[1] += np.dot(A[i, 1], tmp)
+
+    det_C0_C1 = C[0, 0] * C[1, 1] - C[1, 0] * C[0, 1]
+    det_C0_X = C[0, 0] * X[1] - C[1, 0] * X[0]
+    det_X_C1 = X[0] * C[1, 1] - X[1] * C[0, 1]
+    alpha_l = 0.0 if abs(det_C0_C1) < 1e-12 else det_X_C1 / det_C0_C1
+    alpha_r = 0.0 if abs(det_C0_C1) < 1e-12 else det_C0_X / det_C0_C1
+
+    seg_len = float(np.linalg.norm(first - last))
+    eps = 1e-6 * seg_len
+    if alpha_l < eps or alpha_r < eps:
+        # Fallback: place the handles a third of the chord length along the tangents.
+        third = seg_len / 3.0
+        return [first, first + left_tan * third, last + right_tan * third, last]
+    return [first, first + left_tan * alpha_l, last + right_tan * alpha_r, last]
+
+
+def _reparameterize(bez, points, u):
+    out = u.copy()
+    for i, (pt, ui) in enumerate(zip(points, u)):
+        d = _bezier_point(bez, ui) - pt
+        num = float(np.dot(d, _bezier_prime(bez, ui)))
+        den = float(np.dot(_bezier_prime(bez, ui), _bezier_prime(bez, ui))
+                    + np.dot(d, _bezier_prime2(bez, ui)))
+        out[i] = ui if abs(den) < 1e-12 else ui - num / den
+    return np.clip(out, 0.0, 1.0)
+
+
+def _max_error(points, bez, u):
+    dist = np.array([np.linalg.norm(_bezier_point(bez, ui) - pt)
+                     for pt, ui in zip(points, u)])
+    split = int(np.argmax(dist))
+    return float(dist[split]), split
+
+
+def _fit_cubic(points, left_tan, right_tan, error, depth=0):
+    if len(points) == 2:
+        third = float(np.linalg.norm(points[0] - points[1])) / 3.0
+        return [[points[0], points[0] + left_tan * third,
+                 points[1] + right_tan * third, points[1]]]
+
+    u = _chord_length_parameterize(points)
+    bez = _generate_bezier(points, u, left_tan, right_tan)
+    max_err, split = _max_error(points, bez, u)
+    if max_err < error:
+        return [bez]
+
+    # Close enough to converge: refine the parameterisation before splitting.
+    if depth < 24 and max_err < error * error + error:
+        for _ in range(16):
+            u = _reparameterize(bez, points, u)
+            bez = _generate_bezier(points, u, left_tan, right_tan)
+            max_err, split = _max_error(points, bez, u)
+            if max_err < error:
+                return [bez]
+
+    # Guard against pathological inputs that would not split (keeps recursion finite).
+    if split <= 0 or split >= len(points) - 1:
+        return [bez]
+
+    center_tan = _normalize(points[split - 1] - points[split + 1])
+    left = _fit_cubic(points[:split + 1], left_tan, center_tan, error, depth + 1)
+    right = _fit_cubic(points[split:], -center_tan, right_tan, error, depth + 1)
+    return left + right
+
+
+def fit_bezier(points, max_error):
+    """Fit a chain of cubic Bézier segments to an ordered 2D polyline.
+
+    max_error is the largest allowed deviation, in the same units as the points.
+    Returns a list of segments, each a list [P0, C1, C2, P3] of numpy (x, y);
+    an empty list if there is nothing to fit."""
+    P = np.asarray(points, dtype=float)
+    if len(P) < 2:
+        return []
+    # Drop consecutive duplicates: they break chord-length parameterisation.
+    keep = np.concatenate([[True], np.linalg.norm(np.diff(P, axis=0), axis=1) > 1e-9])
+    P = P[keep]
+    if len(P) < 2:
+        return []
+    if len(P) == 2:
+        third = float(np.linalg.norm(P[0] - P[1])) / 3.0
+        tan = _normalize(P[1] - P[0])
+        return [[P[0], P[0] + tan * third, P[1] - tan * third, P[1]]]
+    return _fit_cubic(P, _normalize(P[1] - P[0]), _normalize(P[-2] - P[-1]), max_error)
+
+
+def rdp(points, epsilon):
+    """Ramer-Douglas-Peucker simplification (iterative, so no recursion limit).
+
+    Drops points that lie within epsilon of the line between their kept
+    neighbours, so straight runs collapse to their two endpoints."""
+    P = np.asarray(points, dtype=float)
+    n = len(P)
+    if n < 3 or epsilon <= 0:
+        return P
+    keep = np.zeros(n, dtype=bool)
+    keep[0] = keep[-1] = True
+    stack = [(0, n - 1)]
+    while stack:
+        s, e = stack.pop()
+        if e <= s + 1:
+            continue
+        a, b = P[s], P[e]
+        ab = b - a
+        L = float(np.hypot(ab[0], ab[1]))
+        seg = P[s + 1:e]
+        if L < 1e-12:
+            d = np.linalg.norm(seg - a, axis=1)
+        else:
+            d = np.abs(ab[0] * (a[1] - seg[:, 1]) - (a[0] - seg[:, 0]) * ab[1]) / L
+        k = int(np.argmax(d))
+        if d[k] > epsilon:
+            idx = s + 1 + k
+            keep[idx] = True
+            stack.append((s, idx))
+            stack.append((idx, e))
+    return P[keep]
+
+
+def bezier_to_polyline(segments, resample_length=0.02, simplify_epsilon=None):
+    """Sample fitted Bézier segments back into a polyline for a GP stroke.
+
+    Points are spaced by resample_length along each segment; simplify_epsilon
+    (if given) then removes the near-collinear samples so straight runs keep
+    only a handful of points."""
+    if not segments:
+        return np.zeros((0, 2))
+    chunks = []
+    for si, seg in enumerate(segments):
+        bez = [np.asarray(p, dtype=float) for p in seg]
+        if resample_length and resample_length > 0:
+            n = max(2, int(round(_bezier_arclen(bez) / resample_length)) + 1)
+        else:
+            n = 12
+        ts = np.linspace(0.0, 1.0, n)
+        pts = np.array([_bezier_point(bez, t) for t in ts])
+        chunks.append(pts[1:] if si > 0 else pts)   # skip the duplicated join point
+    poly = np.vstack(chunks)
+    if simplify_epsilon and simplify_epsilon > 0:
+        poly = rdp(poly, simplify_epsilon)
+    return poly

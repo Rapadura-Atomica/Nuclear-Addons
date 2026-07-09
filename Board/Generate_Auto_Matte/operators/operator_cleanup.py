@@ -4,7 +4,8 @@ import numpy as np
 from .common import *
 from ..utils import *
 from ..api_router import *
-from ..solvers.line_fit import longest_path_spine, smooth_and_resample
+from ..solvers.line_fit import (longest_path_spine, smooth_and_resample,
+                                 laplacian_smooth, fit_bezier, bezier_to_polyline, rdp)
 
 
 # ---------------------------------------------------------------------------
@@ -729,6 +730,32 @@ class SkeletonCleanupOperator(_CleanupConfig, bpy.types.Operator):
                     "Higher removes more small detail",
         default=26, min=4, soft_max=120
     )  # type: ignore
+    straighten: bpy.props.BoolProperty(
+        name="Straighten (Bézier)",
+        default=True,
+        description="Fit smooth Bézier curves to the centre-line so near-straight runs "
+                    "become truly straight, with only a few points. Turn off to keep the "
+                    "raw skeleton shape"
+    )  # type: ignore
+    straighten_strength: bpy.props.FloatProperty(
+        name="Straightness",
+        default=0.6, min=0.0, max=1.0, subtype='FACTOR',
+        description="How far the line may deviate from the sketch to become straighter. "
+                    "Higher gives straighter lines with fewer points; lower keeps more of "
+                    "the original curvature"
+    )  # type: ignore
+    to_bezier: bpy.props.BoolProperty(
+        name="Editable Bézier",
+        default=True,
+        description="Convert the clean lines to native Bézier curves. Enter Edit Mode and "
+                    "you can grab the handles of each point to reshape the line"
+    )  # type: ignore
+    bezier_threshold: bpy.props.FloatProperty(
+        name="Bézier Fit",
+        default=0.01, min=0.0, soft_max=0.2, precision=4,
+        description="How closely the Bézier follows the line. Lower keeps more control "
+                    "points (tighter fit); higher gives fewer points and smoother handles"
+    )  # type: ignore
 
     def draw(self, context):
         col = self.layout.column()
@@ -736,8 +763,18 @@ class SkeletonCleanupOperator(_CleanupConfig, bpy.types.Operator):
         col.prop(self, "min_detail")
         col.separator()
         col.label(text="Shape:")
+        col.prop(self, "straighten")
+        if self.straighten:
+            col.prop(self, "straighten_strength")
         col.prop(self, "smooth_steps")
-        col.prop(self, "chaikin_steps")
+        sub = col.row()
+        sub.enabled = not self.straighten
+        sub.prop(self, "chaikin_steps")
+        col.separator()
+        col.label(text="Output type:")
+        col.prop(self, "to_bezier")
+        if self.to_bezier:
+            col.prop(self, "bezier_threshold")
         col.separator()
         col.label(text="Thickness:")
         col.prop(self, "thickness")
@@ -773,6 +810,16 @@ class SkeletonCleanupOperator(_CleanupConfig, bpy.types.Operator):
                 self.report({'WARNING'}, "Nothing to clean up. Select the sketch strokes first.")
                 return {'CANCELLED'}
 
+            # Bézier straightening tolerance, scaled to the drawing so the same
+            # Straightness slider behaves the same at any zoom / object size.
+            all_pts = np.array([c for p in pl for c in p]) if pl else np.zeros((0, 2))
+            if len(all_pts):
+                mn, mx = all_pts.min(0), all_pts.max(0)
+                diag = float(np.hypot(mx[0] - mn[0], mx[1] - mn[1])) or 1.0
+            else:
+                diag = 1.0
+            bez_error = (0.004 + 0.08 * self.straighten_strength) * diag
+
             # uniform thickness (bolder 80th percentile) + average depth / colour
             radii = np.array([pt.pressure for s in stroke_list for pt in s.points])
             base = self.thickness if self.thickness > 1e-6 else (
@@ -788,21 +835,57 @@ class SkeletonCleanupOperator(_CleanupConfig, bpy.types.Operator):
                 _delete_strokes(frame, stroke_list)
 
             made = 0
+            new_strokes = []
             for ln in lines:
-                co = smooth_and_resample(np.array(ln, dtype=float), 0.0, closed=False,
-                                         smooth_steps=self.smooth_steps,
-                                         chaikin_steps=max(2, self.chaikin_steps),
-                                         resample_length=0.02)
+                raw = np.array(ln, dtype=float)
+                if self.straighten:
+                    # Straighten in three steps:
+                    #   1. pre-smooth away the skeleton's 1px stair-steps;
+                    #   2. RDP with the tolerance itself -> flattens every wobble up to
+                    #      `bez_error` into straight runs, keeping only real corners as
+                    #      anchors (this is what actually makes the line straight; a bare
+                    #      Bézier fit only *smooths* the wobble into a bow);
+                    #   3. fit Béziers through those anchors so straight runs stay dead
+                    #      straight and corners get a clean, rounded join.
+                    pre = laplacian_smooth(raw, max(1, self.smooth_steps), closed=False)
+                    anchors = rdp(pre, bez_error)
+                    segs = fit_bezier(anchors, bez_error * 0.15)
+                    co = bezier_to_polyline(segs, resample_length=0.02,
+                                            simplify_epsilon=bez_error * 0.1)
+                else:
+                    co = smooth_and_resample(raw, 0.0, closed=False,
+                                             smooth_steps=self.smooth_steps,
+                                             chaikin_steps=max(2, self.chaikin_steps),
+                                             resample_length=0.02)
                 if len(co) < 2:
                     continue
-                _create_plain_stroke(frame, gp_obj, co, thickness, inv_mat, depth, color)
+                new_strokes.append(
+                    _create_plain_stroke(frame, gp_obj, co, thickness, inv_mat, depth, color))
                 made += 1
 
             refresh_strokes(gp_obj, [frame.frame_number])
+
+            # Convert the fresh lines to native Bézier curves so their handles can be
+            # grabbed in Edit Mode. Only the new strokes are selected, so untouched
+            # strokes (and kept originals) stay as they were. The GP curve type is
+            # rendered as a real Bézier by Blender's draw engine (GPv3, 4.3+).
+            if self.to_bezier and new_strokes:
+                try:
+                    for s in frame.nijigp_strokes:
+                        s.select = False
+                    for ns in new_strokes:
+                        ns.select = True
+                    bpy.ops.object.mode_set(mode='EDIT')
+                    bpy.ops.grease_pencil.convert_curve_type(type='BEZIER',
+                                                             threshold=self.bezier_threshold)
+                    bpy.ops.object.mode_set(mode='OBJECT')
+                except Exception as e:
+                    self.report({'WARNING'}, f"Bézier conversion skipped: {e}")
         finally:
             if gp_obj.mode != current_mode:
                 bpy.ops.object.mode_set(mode=current_mode)
 
         engine = "ink skeleton" if HAVE_SKIMAGE else "numpy fallback"
-        self.report({'INFO'}, f"Cleanup (Ink): {len(stroke_list)} stroke(s) -> {made} line(s) [{engine}].")
+        shape = "Bézier" if self.to_bezier else "line"
+        self.report({'INFO'}, f"Cleanup (Ink): {len(stroke_list)} stroke(s) -> {made} {shape}(s) [{engine}].")
         return {'FINISHED'}
