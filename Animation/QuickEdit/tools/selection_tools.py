@@ -11,6 +11,7 @@ class GPENCIL_WST_SelectTool(bpy.types.WorkSpaceTool):
     bl_keymap = (
         ("gpencil.draw_mode_box_select", {"type": 'LEFTMOUSE', "value": 'PRESS'}, {}),
         ("gpencil.draw_mode_lasso_select", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True}, {}),
+        ("gpencil.pick_mesh_object", {"type": 'LEFTMOUSE', "value": 'PRESS', "alt": True}, {}),
     )
 
 class GPENCIL_WST_LassoTool(bpy.types.WorkSpaceTool):
@@ -23,4 +24,5 @@ class GPENCIL_WST_LassoTool(bpy.types.WorkSpaceTool):
     bl_widget = None
     bl_keymap = (
         ("gpencil.draw_mode_lasso_select", {"type": 'LEFTMOUSE', "value": 'PRESS'}, {}),
+        ("gpencil.pick_mesh_object", {"type": 'LEFTMOUSE', "value": 'PRESS', "alt": True}, {}),
     )

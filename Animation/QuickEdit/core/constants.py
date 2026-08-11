@@ -34,6 +34,7 @@ ROTATION_HANDLE_DISTANCE = 70
 ROTATION_HANDLE_SIZE = 12
 
 COLOR_BBOX = (0.8, 0.2, 0.2, 0.8)
+COLOR_BBOX_MESH = (0.2, 0.6, 1.0, 0.9)
 COLOR_HANDLE = (0.2, 0.8, 0.2, 1.0)
 COLOR_HANDLE_HOVER = (1.0, 0.8, 0.2, 1.0)
 COLOR_HANDLE_ACTIVE = (1.0, 0.2, 0.2, 1.0)
@@ -57,7 +58,11 @@ _bbox_data = None
 _original_points = {}
 _original_screen_points = {}
 _total_rotation = 0.0
-_pivot_pos = None 
+_pivot_pos = None
+
+# Alvo mesh (BG de cenário) controlado pela BBox, por nome de objeto
+_mesh_target = None
+_mesh_bbox_handle = None
 
 #_gpencil_clipboard = {
 #    'strokes_data': [],

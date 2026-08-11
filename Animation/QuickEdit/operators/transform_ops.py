@@ -15,7 +15,8 @@ from ..core.utilities import (
 from ..compatibility.api_router import obj_is_gp, layer_hidden, get_layer_frame_by_number, is_frame_valid
 from ..ui.visual_feedback import StrokeHighlighter
 
-def draw_bbox(bbox, handle_hover, handle_active, is_proportional=False):
+def draw_bbox(bbox, handle_hover, handle_active, is_proportional=False,
+              color_override=None, show_shear=True):
     """Desenha a bounding box, handles e gizmo pivot"""
     if not bbox:
         return
@@ -35,6 +36,8 @@ def draw_bbox(bbox, handle_hover, handle_active, is_proportional=False):
     shader.bind()
     if is_proportional:
         shader.uniform_float("color", (0.2, 0.8, 0.8, 0.8))  # Ciano para proporcional
+    elif color_override:
+        shader.uniform_float("color", color_override)  # Azul para mesh de cenário
     else:
         shader.uniform_float("color", constants.COLOR_BBOX)
     gpu.state.line_width_set(constants.LINE_WIDTH)
@@ -61,11 +64,16 @@ def draw_bbox(bbox, handle_hover, handle_active, is_proportional=False):
         (constants.HandleType.LEFT, (corners[0] + corners[3]) / 2),
         (constants.HandleType.RIGHT, (corners[1] + corners[2]) / 2),
         (constants.HandleType.CENTER, center),
-        (constants.HandleType.SHEAR_TOP, (corners[2] + corners[3]) / 2 + Vector((0, shear_offset))),
-        (constants.HandleType.SHEAR_BOTTOM, (corners[0] + corners[1]) / 2 + Vector((0, -shear_offset))),
-        (constants.HandleType.SHEAR_LEFT, (corners[0] + corners[3]) / 2 + Vector((-shear_offset, 0))),
-        (constants.HandleType.SHEAR_RIGHT, (corners[1] + corners[2]) / 2 + Vector((shear_offset, 0))),
     ]
+
+    # Cisalhamento não se aplica a objetos (só guardam loc/rot/scale)
+    if show_shear:
+        handle_positions += [
+            (constants.HandleType.SHEAR_TOP, (corners[2] + corners[3]) / 2 + Vector((0, shear_offset))),
+            (constants.HandleType.SHEAR_BOTTOM, (corners[0] + corners[1]) / 2 + Vector((0, -shear_offset))),
+            (constants.HandleType.SHEAR_LEFT, (corners[0] + corners[3]) / 2 + Vector((-shear_offset, 0))),
+            (constants.HandleType.SHEAR_RIGHT, (corners[1] + corners[2]) / 2 + Vector((shear_offset, 0))),
+        ]
 
     for handle_type, pos in handle_positions:
         if handle_type == handle_active:
@@ -147,7 +155,13 @@ class GPENCIL_OT_bbox_transform(bpy.types.Operator):
         
         # Debug opcional (descomente para ver todos os eventos no console)
         # print(f"[BBox Modal] Evento: type={event.type} | ctrl={event.ctrl} | shift={event.shift} | alt={event.alt} | value={event.value} | mouse=({event.mouse_region_x}, {event.mouse_region_y})")
-        
+
+        # 0. Alt+Clique: sai da BBox de strokes e passa o controle para a BBox de mesh
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and event.alt:
+            self.finish(context)
+            bpy.ops.gpencil.pick_mesh_object('INVOKE_DEFAULT')
+            return {'FINISHED'}
+
         # 1. Checa se o evento deve passar para outros operadores (clipboard, delete, undo, navegação, etc.)
         if BBoxEventHandler.handle_event(context, event, self):
             # Se passou, ainda redesenha se necessário (hover, etc.)

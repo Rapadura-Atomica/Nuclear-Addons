@@ -31,6 +31,7 @@ class GPENCIL_PT_quick_edit_tools(Panel):
         row = col.row(align=True)
         row.operator("gpencil.activate_select_tool", text="", icon='RESTRICT_SELECT_OFF')
         row.operator("gpencil.activate_lasso_tool", text="", icon='GP_SELECT_POINTS')
+        col.label(text="Alt+Clique: mesh de cenário", icon='MESH_DATA')
         
         # Se houver seleção, mostrar botão da BBox
         world_points, _, _ = GPToolManager.get_selected_points(context)
@@ -97,9 +98,19 @@ class GPENCIL_PT_bbox_display(Panel):
         return constants._bbox_data is not None
     
     def draw(self, context):
+        from ..operators.mesh_ops import get_mesh_target
+
         layout = self.layout
+
+        # Quando o alvo é um mesh de cenário, as ações de stroke não se aplicam
+        mesh_target = get_mesh_target()
+        if mesh_target:
+            layout.label(text=f"Mesh: {mesh_target.name}", icon='MESH_DATA')
+            layout.operator("gpencil.clear_mesh_target", text="Soltar Mesh", icon='X')
+            return
+
         layout.label(text="BBox Ativa", icon='VIEW_PAN')
-        
+
         # Ações rápidas enquanto a BBox está ativa
         row = layout.row(align=True)
         row.operator("gpencil.delete_selected_strokes", text="Del", icon='TRASH')
