@@ -156,8 +156,8 @@ class GPENCIL_OT_bbox_transform(bpy.types.Operator):
         # Debug opcional (descomente para ver todos os eventos no console)
         # print(f"[BBox Modal] Evento: type={event.type} | ctrl={event.ctrl} | shift={event.shift} | alt={event.alt} | value={event.value} | mouse=({event.mouse_region_x}, {event.mouse_region_y})")
 
-        # 0. Alt+Clique: sai da BBox de strokes e passa o controle para a BBox de mesh
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and event.alt:
+        # 0. Ctrl+Clique: sai da BBox de strokes e passa o controle para a BBox de mesh
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and event.ctrl:
             self.finish(context)
             bpy.ops.gpencil.pick_mesh_object('INVOKE_DEFAULT')
             return {'FINISHED'}

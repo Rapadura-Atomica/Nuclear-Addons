@@ -31,7 +31,7 @@ class GPENCIL_PT_quick_edit_tools(Panel):
         row = col.row(align=True)
         row.operator("gpencil.activate_select_tool", text="", icon='RESTRICT_SELECT_OFF')
         row.operator("gpencil.activate_lasso_tool", text="", icon='GP_SELECT_POINTS')
-        col.label(text="Alt+Clique: mesh de cenário", icon='MESH_DATA')
+        col.label(text="Ctrl+Clique: mesh de cenário", icon='MESH_DATA')
         
         # Se houver seleção, mostrar botão da BBox
         world_points, _, _ = GPToolManager.get_selected_points(context)

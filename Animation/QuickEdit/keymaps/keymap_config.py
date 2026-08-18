@@ -28,8 +28,8 @@ def register():
         # NOVO: Shift + Clique para seleção múltipla
         km.keymap_items.new("gpencil.shift_select_strokes", 'LEFTMOUSE', 'PRESS', shift=True)
 
-        # Alt + Clique: seleciona somente meshes (BGs de cenário)
-        km.keymap_items.new("gpencil.pick_mesh_object", 'LEFTMOUSE', 'PRESS', alt=True)
+        # Ctrl + Clique: seleciona somente meshes (BGs de cenário)
+        km.keymap_items.new("gpencil.pick_mesh_object", 'LEFTMOUSE', 'PRESS', ctrl=True)
 
         # CTRL X
         km.keymap_items.new("gpencil.cut_strokes_simple", 'X', 'PRESS', ctrl=True)

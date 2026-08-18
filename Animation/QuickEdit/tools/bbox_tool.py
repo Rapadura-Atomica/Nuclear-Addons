@@ -10,5 +10,5 @@ class GPENCIL_WST_BBoxTool(bpy.types.WorkSpaceTool):
     bl_widget = None
     bl_keymap = (
         ("gpencil.bbox_transform", {"type": 'LEFTMOUSE', "value": 'PRESS'}, {}),
-        ("gpencil.pick_mesh_object", {"type": 'LEFTMOUSE', "value": 'PRESS', "alt": True}, {}),
+        ("gpencil.pick_mesh_object", {"type": 'LEFTMOUSE', "value": 'PRESS', "ctrl": True}, {}),
     )

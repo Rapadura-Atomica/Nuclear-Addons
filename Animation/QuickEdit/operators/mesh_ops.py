@@ -186,7 +186,7 @@ def insert_object_keyframe_if_auto(obj):
     return True
 
 class GPENCIL_OT_pick_mesh_object(bpy.types.Operator):
-    """Alt+Clique: seleciona apenas objetos Mesh (BGs de cenário) sob o cursor"""
+    """Ctrl+Clique: seleciona apenas objetos Mesh (BGs de cenário) sob o cursor"""
     bl_idname = "gpencil.pick_mesh_object"
     bl_label = "Selecionar Mesh de Cenário"
     bl_description = "Detecta somente objetos do tipo Mesh sob o cursor e abre a BBox de transformação"
@@ -266,8 +266,8 @@ class GPENCIL_OT_mesh_bbox_transform(bpy.types.Operator):
             self.finish(context)
             return {'CANCELLED'}
 
-        # Alt+Clique novamente: troca de mesh alvo
-        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and event.alt:
+        # Ctrl+Clique novamente: troca de mesh alvo
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS' and event.ctrl:
             self.finish(context)
             bpy.ops.gpencil.pick_mesh_object('INVOKE_DEFAULT')
             return {'FINISHED'}
